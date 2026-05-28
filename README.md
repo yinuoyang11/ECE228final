@@ -62,13 +62,50 @@ pooled = vl_tokens.mean(dim=1)  # (B, D)
 cond = projector(pooled)        # (B, 256)
 ```
 
+## Representation Encoder
+
+This package includes a lightweight upstream encoder that converts LIBERO-style
+image, state, and instruction inputs into the condition key expected by the flow
+decoder:
+
+```python
+from lerobot_policy_pi0_lite_flow.representation_encoder import (
+    RepresentationEncoder,
+    RepresentationEncoderConfig,
+)
+
+encoder = RepresentationEncoder(RepresentationEncoderConfig(cond_dim=256, num_views=2))
+batch = {
+    "images": images,              # (B, V, C, H, W)
+    "state": state,                # (B, 8) for LIBERO
+    "instruction": instructions,   # list[str]
+}
+batch = encoder.add_condition_to_batch(batch)
+batch["observation.cond"].shape == (B, 256)
+```
+
+For a CLIP-backed smoke test, run:
+
+```powershell
+python scripts\smoke_clip_encoder.py
+```
+
+For a minimal custom training loop on LIBERO action chunks, run a short mock
+encoder smoke test first:
+
+```powershell
+python scripts\train_flow_custom.py --steps 3 --max-samples 16 --batch-size 2
+```
+
+Add `--use-clip` to train the fusion layers and decoder with frozen CLIP image
+and text features.
+
 ## Environment
 
 ```powershell
 conda create -n ece228-pi0lite python=3.12
 conda activate ece228-pi0lite
-pip install lerobot torch einops pytest
-pip install -e .
+pip install -e ".[dev,encoder]"
 pytest
 ```
 

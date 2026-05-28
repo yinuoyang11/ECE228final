@@ -90,7 +90,7 @@ class PI0LiteFlowConfig(PreTrainedConfig):
 
         action_feature = getattr(self, "action_feature", None)
         output_features = getattr(self, "output_features", None)
-        if output_features is not None and action_feature is None:
+        if output_features and action_feature is None:
             raise ValueError("PI0LiteFlowPolicy requires an action output feature.")
 
     def get_optimizer_preset(self) -> AdamWConfig:

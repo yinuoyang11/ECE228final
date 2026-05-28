@@ -18,6 +18,15 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+encoder = [
+    "transformers>=4.45",
+    "torchvision>=0.17",
+    "datasets>=2.19",
+    "huggingface-hub>=0.23",
+    "accelerate>=0.30",
+    "safetensors>=0.4",
+    "av>=12.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
