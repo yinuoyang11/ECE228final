@@ -84,6 +84,40 @@ batch = encoder.add_condition_to_batch(batch)
 batch["observation.cond"].shape == (B, 256)
 ```
 
+The current encoder path is:
+
+```text
+observation.images.image  -> frozen CLIP image encoder -> z_img1
+observation.images.image2 -> frozen CLIP image encoder -> z_img2
+task                      -> frozen CLIP text encoder  -> z_text
+observation.state         -> state MLP                 -> z_state
+
+concat/project/fuse(z_img1, z_img2, z_text, z_state) -> observation.cond
+```
+
+For `HuggingFaceVLA/libero`, the inspected sample fields are:
+
+| Field | Shape / type |
+| --- | --- |
+| `observation.images.image` | `(3, 256, 256)`, `float32` |
+| `observation.images.image2` | `(3, 256, 256)`, `float32` |
+| `observation.state` | `(8,)`, `float32` |
+| `task` | `str` |
+| `action` | `(7,)`, `float32` |
+
+`LIBEROActionChunkDataset` wraps these frame-level samples and builds future
+action chunks without crossing episode boundaries:
+
+```python
+{
+    "images": ...,        # (B, 2, 3, 256, 256)
+    "state": ...,         # (B, 8)
+    "instruction": ...,   # list[str]
+    "action": ...,        # (B, horizon, 7)
+    "action_is_pad": ..., # (B, horizon)
+}
+```
+
 For a CLIP-backed smoke test, run:
 
 ```powershell
@@ -98,7 +132,101 @@ python scripts\train_flow_custom.py --steps 3 --max-samples 16 --batch-size 2
 ```
 
 Add `--use-clip` to train the fusion layers and decoder with frozen CLIP image
-and text features.
+and text features. The training script writes `args.json`, `metrics.csv`, and
+checkpoints under `runs/pi0_lite_flow/<run-name>/` by default:
+
+```powershell
+python scripts\train_flow_custom.py `
+  --use-clip `
+  --steps 1000 `
+  --max-samples 5000 `
+  --batch-size 8 `
+  --lr 1e-4 `
+  --save-every 250 `
+  --run-name clip_flow_h16_smoke
+```
+
+Convenience launch scripts are also provided:
+
+```powershell
+.\scripts\train_clip_debug.ps1
+.\scripts\train_clip_1k.ps1
+```
+
+If PowerShell blocks local scripts, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\train_clip_debug.ps1
+```
+
+If `python` is not on PATH, set the `PYTHON` environment variable first:
+
+```powershell
+$env:PYTHON="C:\Users\admin\.conda\envs\ece228_pi0_py312\python.exe"
+.\scripts\train_clip_debug.ps1
+```
+
+From Git Bash or a Unix-like shell:
+
+```bash
+bash scripts/train_clip_debug.sh
+bash scripts/train_clip_1k.sh
+```
+
+Plot a saved training curve with:
+
+```powershell
+python scripts\plot_metrics.py runs\pi0_lite_flow\clip_flow_h16_debug\metrics.csv
+```
+
+Run offline validation on held-out LIBERO samples with:
+
+```powershell
+python scripts\eval_flow_custom.py `
+  runs\pi0_lite_flow\clip_flow_h16_1k\checkpoint_final.pt `
+  --num-samples 512 `
+  --batch-size 8 `
+  --output runs\pi0_lite_flow\clip_flow_h16_1k\eval.csv
+```
+
+## Current Encoder Results
+
+The first 1000-step CLIP run used:
+
+```text
+dataset: HuggingFaceVLA/libero
+train samples: first 5000 frame indices
+validation samples: indices 5000-5511
+horizon: 16
+batch size: 8
+condition dimension: 256
+GPU: NVIDIA GeForce RTX 5060 Ti
+```
+
+Training loss decreased substantially:
+
+| Metric | Value |
+| --- | ---: |
+| first-step loss | 1.5355 |
+| final-step loss | 0.4177 |
+| minimum loss | 0.2489 at step 952 |
+| average first 100 steps | 1.0942 |
+| average last 100 steps | 0.4168 |
+
+![CLIP flow training loss](docs/figures/clip_flow_h16_1k_loss.svg)
+
+Held-out offline validation on 512 samples:
+
+| Metric | Value |
+| --- | ---: |
+| action MSE | 0.2633 |
+| action L1 | 0.3686 |
+| predicted action smoothness | 1.0836 |
+| latency per sample | 0.0048 s |
+
+These numbers show that the representation encoder, action chunk dataset, and
+flow decoder training loop are functional. They are not yet a final comparison
+against BC or autoregressive-token baselines.
 
 ## Environment
 

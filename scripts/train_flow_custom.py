@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import json
+import random
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -33,17 +37,29 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--max-samples", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--use-clip", action="store_true", help="Use frozen CLIP image/text encoders instead of mocks.")
     parser.add_argument("--clip-model", default="openai/clip-vit-base-patch32")
     parser.add_argument("--log-every", type=int, default=1)
+    parser.add_argument("--save-every", type=int, default=500)
+    parser.add_argument("--output-dir", default="runs/pi0_lite_flow")
+    parser.add_argument("--run-name", default=None)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--clip-grad-norm", type=float, default=1.0)
     args = parser.parse_args()
 
+    set_seed(args.seed)
     device = torch.device(args.device)
+    run_dir = make_run_dir(args.output_dir, args.run_name)
+    log_path = run_dir / "metrics.csv"
+    save_args(args, run_dir)
+
     dataset = LIBEROActionChunkDataset(repo_id=args.repo_id, horizon=args.horizon)
     if args.max_samples > 0:
         dataset = Subset(dataset, range(min(args.max_samples, len(dataset))))
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 
     image_encoder = None
     text_encoder = None
@@ -75,10 +91,12 @@ def main() -> None:
     ).to(device)
 
     trainable_params = [param for param in list(encoder.parameters()) + list(policy.parameters()) if param.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr)
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
 
     encoder.train()
     policy.train()
+    print(f"run_dir={run_dir}")
+    print(f"device={device} trainable_params={sum(param.numel() for param in trainable_params)}")
     step = 0
     while step < args.steps:
         for batch in loader:
@@ -95,12 +113,28 @@ def main() -> None:
             loss = output["loss"]
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            grad_norm = None
+            if args.clip_grad_norm > 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, args.clip_grad_norm)
             optimizer.step()
 
             if step % args.log_every == 0:
-                print(f"step={step} loss={loss.item():.6f}")
+                row = {
+                    "step": step,
+                    "loss": float(loss.detach().cpu()),
+                    "fm_loss": float(output["fm_loss"].detach().cpu()),
+                    "pred_velocity_norm": float(output["pred_velocity_norm"].detach().cpu()),
+                    "target_velocity_norm": float(output["target_velocity_norm"].detach().cpu()),
+                    "grad_norm": float(grad_norm.detach().cpu()) if isinstance(grad_norm, torch.Tensor) else "",
+                }
+                append_metrics(log_path, row)
+                print(" ".join(f"{key}={value}" for key, value in row.items()))
+            if args.save_every > 0 and step % args.save_every == 0:
+                save_checkpoint(run_dir / f"checkpoint_step_{step:06d}.pt", step, encoder, policy, optimizer, args)
             if step >= args.steps:
                 break
+
+    save_checkpoint(run_dir / "checkpoint_final.pt", step, encoder, policy, optimizer, args)
 
 
 def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
@@ -111,6 +145,74 @@ def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
         else:
             output[key] = value
     return output
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def make_run_dir(output_dir: str, run_name: str | None) -> Path:
+    root = Path(output_dir)
+    name = run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = root / name
+    if run_dir.exists():
+        suffix = 1
+        while (root / f"{name}_{suffix:03d}").exists():
+            suffix += 1
+        run_dir = root / f"{name}_{suffix:03d}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def save_args(args: argparse.Namespace, run_dir: Path) -> None:
+    with (run_dir / "args.json").open("w", encoding="utf-8") as file:
+        json.dump(vars(args), file, indent=2, sort_keys=True)
+
+
+def append_metrics(path: Path, row: dict[str, int | float | str]) -> None:
+    write_header = not path.exists()
+    with path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def save_checkpoint(
+    path: Path,
+    step: int,
+    encoder: RepresentationEncoder,
+    policy: PI0LiteFlowPolicy,
+    optimizer: torch.optim.Optimizer,
+    args: argparse.Namespace,
+) -> None:
+    torch.save(
+        {
+            "step": step,
+            "args": vars(args),
+            "encoder": trainable_state_dict(encoder),
+            "policy": policy.state_dict(),
+            "optimizer": optimizer.state_dict(),
+        },
+        path,
+    )
+    print(f"saved_checkpoint={path}")
+
+
+def trainable_state_dict(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+    trainable_names = {name for name, param in module.named_parameters() if param.requires_grad}
+    return {
+        name: value
+        for name, value in module.state_dict().items()
+        if name in trainable_names or not _is_clip_backbone_key(name)
+    }
+
+
+def _is_clip_backbone_key(name: str) -> bool:
+    return name.startswith("image_encoder.model.") or name.startswith("text_encoder.model.")
 
 
 if __name__ == "__main__":

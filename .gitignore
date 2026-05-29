@@ -12,5 +12,7 @@ env/
 build/
 dist/
 *.log
+runs/
+checkpoints/
 .DS_Store
 Thumbs.db
