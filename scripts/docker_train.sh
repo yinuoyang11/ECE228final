@@ -18,6 +18,26 @@ fi
 
 mkdir -p "${ROOT}/runs" "${HF_CACHE}"
 
+check_writable_dir() {
+  local dir="$1"
+  local probe="${dir}/.ece228_write_test"
+  if [[ -d "${dir}" ]] && ! touch "${probe}" 2>/dev/null; then
+    echo "ERROR: ${dir} is not writable by user $(id -u):$(id -g)." >&2
+    echo "Fix on the host with:" >&2
+    echo "  sudo chown -R $(id -u):$(id -g) \"${HF_CACHE}\"" >&2
+    exit 1
+  fi
+  rm -f "${probe}" 2>/dev/null || true
+}
+
+mkdir -p "${HF_CACHE}/hub/.locks" 2>/dev/null || true
+check_writable_dir "${HF_CACHE}"
+check_writable_dir "${HF_CACHE}/hub"
+check_writable_dir "${HF_CACHE}/hub/.locks"
+if [[ -d "${HF_CACHE}/hub/.locks/datasets--HuggingFaceVLA--libero" ]]; then
+  check_writable_dir "${HF_CACHE}/hub/.locks/datasets--HuggingFaceVLA--libero"
+fi
+
 docker run --rm \
   --gpus "${GPU_REQUEST}" \
   --ipc=host \
