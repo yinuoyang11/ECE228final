@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HF_HOME=/cache/huggingface \
+    LIBERO_CONFIG_PATH=/opt/libero-config \
     MUJOCO_GL=egl \
     PYOPENGL_PLATFORM=egl \
     PATH=/opt/venv/bin:${PATH}
@@ -46,6 +47,9 @@ ARG INSTALL_LIBERO=0
 RUN if [ "${INSTALL_LIBERO}" = "1" ]; then \
         /usr/bin/cmake --version \
         && PATH="/usr/bin:/opt/venv/bin:${PATH}" /opt/venv/bin/python -m pip install "lerobot[libero]==0.5.1" \
+        && mkdir -p "${LIBERO_CONFIG_PATH}" \
+        && LIBERO_ROOT="/opt/venv/lib/python3.12/site-packages/libero/libero" \
+        && printf "assets: %s/assets\nbddl_files: %s/bddl_files\nbenchmark_root: %s\ndatasets: %s/../datasets\ninit_states: %s/init_files\n" "${LIBERO_ROOT}" "${LIBERO_ROOT}" "${LIBERO_ROOT}" "${LIBERO_ROOT}" "${LIBERO_ROOT}" > "${LIBERO_CONFIG_PATH}/config.yaml" \
         && /opt/venv/bin/python -c "from libero.libero import benchmark; from libero.libero.envs import OffScreenRenderEnv; print(sorted(benchmark.get_benchmark_dict()))"; \
     fi
 
