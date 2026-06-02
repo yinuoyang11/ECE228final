@@ -29,6 +29,7 @@ from lerobot_policy_pi0_lite_flow.representation_encoder import (  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description="Minimal custom LIBERO training loop for pi0-lite flow.")
     parser.add_argument("--repo-id", default="HuggingFaceVLA/libero")
+    parser.add_argument("--task-indices", nargs="+", type=int, default=None, help="Optional LIBERO task indices to train.")
     parser.add_argument("--horizon", type=int, default=16)
     parser.add_argument("--action-dim", type=int, default=7)
     parser.add_argument("--state-dim", type=int, default=8)
@@ -56,10 +57,11 @@ def main() -> None:
     log_path = run_dir / "metrics.csv"
     save_args(args, run_dir)
 
-    dataset = LIBEROActionChunkDataset(repo_id=args.repo_id, horizon=args.horizon)
+    dataset = LIBEROActionChunkDataset(repo_id=args.repo_id, horizon=args.horizon, task_indices=args.task_indices)
     if args.max_samples > 0:
         dataset = Subset(dataset, range(min(args.max_samples, len(dataset))))
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    print(f"dataset_samples={len(dataset)} task_indices={args.task_indices or 'all'}")
 
     image_encoder = None
     text_encoder = None

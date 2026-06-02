@@ -82,8 +82,8 @@ class FakeEpisodeTable:
     def __iter__(self):
         return iter(
             [
-                {"dataset_from_index": 0, "dataset_to_index": 3, "length": 3},
-                {"dataset_from_index": 3, "dataset_to_index": 5, "length": 2},
+                {"dataset_from_index": 0, "dataset_to_index": 3, "length": 3, "task_index": 0},
+                {"dataset_from_index": 3, "dataset_to_index": 5, "length": 2, "task_index": 1},
             ]
         )
 
@@ -106,6 +106,7 @@ class FakeLIBERODataset:
                     "observation.state": torch.full((8,), float(idx)),
                     "action": torch.full((7,), float(idx)),
                     "task": f"task {episode_index}",
+                    "task_index": torch.tensor(episode_index),
                     "episode_index": torch.tensor(episode_index),
                 }
             )
@@ -137,3 +138,11 @@ def test_action_chunk_dataset_handles_full_chunk_inside_episode():
 
     assert item["action_is_pad"].tolist() == [False, False]
     assert item["action"][:, 0].tolist() == [3.0, 4.0]
+
+
+def test_action_chunk_dataset_filters_tasks_without_changing_episode_chunks():
+    dataset = LIBEROActionChunkDataset(base_dataset=FakeLIBERODataset(), horizon=2, task_indices=[1])
+
+    assert len(dataset) == 2
+    assert dataset[0]["instruction"] == "task 1"
+    assert dataset[0]["action"][:, 0].tolist() == [3.0, 4.0]

@@ -29,6 +29,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Offline validation for the custom pi0-lite flow pipeline.")
     parser.add_argument("checkpoint", help="Path to checkpoint_final.pt or checkpoint_step_*.pt")
     parser.add_argument("--repo-id", default=None)
+    parser.add_argument("--task-indices", nargs="+", type=int, default=None, help="Override checkpoint LIBERO task indices.")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-samples", type=int, default=512)
     parser.add_argument("--skip-samples", type=int, default=None)
@@ -48,9 +49,10 @@ def main() -> None:
     cond_dim = int(train_args.get("cond_dim", 256))
     clip_model = train_args.get("clip_model", "openai/clip-vit-base-patch32")
     use_clip = bool(train_args.get("use_clip", True))
+    task_indices = args.task_indices if args.task_indices is not None else train_args.get("task_indices")
     skip_samples = int(args.skip_samples if args.skip_samples is not None else train_args.get("max_samples", 0))
 
-    dataset = LIBEROActionChunkDataset(repo_id=repo_id, horizon=horizon)
+    dataset = LIBEROActionChunkDataset(repo_id=repo_id, horizon=horizon, task_indices=task_indices)
     start = min(skip_samples, len(dataset))
     end = min(start + args.num_samples, len(dataset))
     dataset = Subset(dataset, range(start, end))
@@ -139,6 +141,7 @@ def main() -> None:
     metrics = {
         "checkpoint": str(args.checkpoint),
         "repo_id": repo_id,
+        "task_indices": task_indices or "all",
         "start_index": start,
         "num_samples": end - start,
         "mse": totals["mse_sum"] / max(totals["num_values"], 1),

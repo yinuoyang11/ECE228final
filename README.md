@@ -243,3 +243,46 @@ For local core checks before LeRobot is installed, run:
 $env:PYTHONPATH="src"
 pytest
 ```
+
+## Docker Training
+
+See [`docs/server_training.md`](docs/server_training.md) for the complete Ubuntu
+GPU server setup.
+
+The Linux GPU container persists checkpoints under `runs/` and Hugging Face
+downloads under `~/.cache/huggingface` on the host. Install Docker with the
+NVIDIA Container Toolkit, then run:
+
+```bash
+bash scripts/docker_build.sh
+bash scripts/docker_train.sh
+```
+
+Build with the optional Linux-only LIBERO simulator dependencies when preparing
+the same image for future headless rollouts:
+
+```bash
+INSTALL_LIBERO=1 bash scripts/docker_build.sh
+```
+
+The Docker launcher defaults to all available LIBERO samples. Override its
+environment variables for a short smoke run or a longer experiment:
+
+```bash
+STEPS=3 MAX_SAMPLES=16 BATCH_SIZE=2 RUN_NAME=smoke bash scripts/docker_train.sh
+STEPS=100000 BATCH_SIZE=8 RUN_NAME=clip_flow_full bash scripts/docker_train.sh
+```
+
+Read the dataset metadata without downloading the full video dataset:
+
+```bash
+python scripts/inspect_libero_metadata.py
+python scripts/inspect_libero_metadata.py --list-tasks
+```
+
+Train one shared model on a selected subset of LIBERO tasks:
+
+```bash
+STEPS=10000 RUN_NAME=tasks_0_1_2 \
+  bash scripts/docker_train.sh --task-indices 0 1 2
+```

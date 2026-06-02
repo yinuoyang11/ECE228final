@@ -51,6 +51,7 @@ class LIBEROActionChunkDataset(Dataset):
         repo_id: str = "HuggingFaceVLA/libero",
         horizon: int = 16,
         base_dataset: Any | None = None,
+        task_indices: Sequence[int] | None = None,
         image_keys: Sequence[str] = DEFAULT_IMAGE_KEYS,
         state_key: str = "observation.state",
         action_key: str = "action",
@@ -68,11 +69,15 @@ class LIBEROActionChunkDataset(Dataset):
         self.episode_ranges = _episode_ranges(self.dataset)
         self.index_to_episode_end = _index_to_episode_end(self.episode_ranges)
         self.action_source = _make_action_source(self.dataset, action_key)
+        self.task_indices = tuple(sorted(set(task_indices))) if task_indices is not None else None
+        self.selected_indices = _indices_for_tasks(self.dataset, self.episode_ranges, self.task_indices)
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        return len(self.selected_indices) if self.selected_indices is not None else len(self.dataset)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        if self.selected_indices is not None:
+            index = self.selected_indices[index]
         sample = self.dataset[index]
         action_chunk, action_is_pad = self._action_chunk(index)
         batch = libero_samples_to_encoder_batch(
@@ -201,3 +206,66 @@ def _make_action_source(dataset: Any, action_key: str) -> Any:
 
 def _get_action(source: Any, index: int, action_key: str) -> Any:
     return source[index][action_key]
+
+
+def _indices_for_tasks(
+    dataset: Any,
+    episode_ranges: Sequence[tuple[int, int]],
+    task_indices: Sequence[int] | None,
+) -> list[int] | None:
+    if task_indices is None:
+        return None
+    if not task_indices:
+        raise ValueError("task_indices must contain at least one task index")
+    if any(task_index < 0 for task_index in task_indices):
+        raise ValueError("task_indices must be non-negative")
+
+    selected_tasks = set(task_indices)
+    episode_rows = _episode_rows(dataset)
+    if len(episode_rows) == len(episode_ranges):
+        episode_task_indices = [_episode_task_index(row) for row in episode_rows]
+        if all(task_index is not None for task_index in episode_task_indices):
+            return [
+                index
+                for (start, end), task_index in zip(episode_ranges, episode_task_indices, strict=True)
+                if task_index in selected_tasks
+                for index in range(start, end)
+            ]
+
+    task_source = _make_task_source(dataset)
+    return [
+        index
+        for index in range(len(dataset))
+        if int(_to_tensor(task_source[index]["task_index"]).item()) in selected_tasks
+    ]
+
+
+def _episode_rows(dataset: Any) -> list[Mapping[str, Any]]:
+    meta = getattr(dataset, "meta", None)
+    episodes = getattr(meta, "episodes", None)
+    if episodes is None:
+        return []
+    try:
+        return list(episodes)
+    except TypeError:
+        return []
+
+
+def _episode_task_index(row: Mapping[str, Any]) -> int | None:
+    for key in ("task_index", "stats/task_index/min"):
+        if key not in row:
+            continue
+        value = _to_tensor(row[key])
+        if value.numel() == 1:
+            return int(value.item())
+    return None
+
+
+def _make_task_source(dataset: Any) -> Any:
+    hf_dataset = getattr(dataset, "hf_dataset", None)
+    if hf_dataset is not None and hasattr(hf_dataset, "select_columns"):
+        try:
+            return hf_dataset.select_columns(["task_index"])
+        except Exception:
+            pass
+    return dataset
