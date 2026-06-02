@@ -40,7 +40,7 @@ WORKDIR /workspace
 COPY . .
 
 RUN python -m pip install -r requirements.txt
-RUN python -c "import torch, transformers; from transformers import CLIPModel, CLIPTokenizer; print(f'torch={torch.__version__} transformers={transformers.__version__}')"
+RUN python -c "from importlib.metadata import version; import torch, torchcodec, transformers; from lerobot.datasets.lerobot_dataset import LeRobotDataset; from transformers import CLIPModel, CLIPTokenizer; print('torch=' + torch.__version__ + ' torchcodec=' + version('torchcodec') + ' transformers=' + transformers.__version__)"
 
 ARG INSTALL_LIBERO=0
 RUN if [ "${INSTALL_LIBERO}" = "1" ]; then \
