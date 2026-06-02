@@ -1,0 +1,14 @@
+\begin{table}[h]
+\centering
+\caption{Comparison of action-generation methods on synthetic benchmark.}
+\label{tab:results}
+\begin{tabular}{lcccr}
+\toprule
+Method & MSE $\downarrow$ & L1 $\downarrow$ & Jerk $\downarrow$ & Latency (ms) \\
+\midrule
+Flow Matching (CFM) & 5.6731 & 1.9133 & 0.3266 & 0.83 \\
+Autoregressive Tokens & \textbf{5.3859} & \textbf{1.8572} & 0.1311 & 51.88 \\
+BC Regression (MSE) & 5.6216 & 1.9042 & \textbf{0.0744} & 0.00 \\
+\bottomrule
+\end{tabular}
+\end{table}

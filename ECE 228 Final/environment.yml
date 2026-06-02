@@ -1,0 +1,12 @@
+name: ece228-pi0lite
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - torch>=2.2
+      - einops>=0.7
+      - lerobot>=0.5.1
+      - pytest>=8.0
+      - -e .
