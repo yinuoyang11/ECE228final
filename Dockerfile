@@ -44,7 +44,8 @@ RUN python -c "from importlib.metadata import version; import torch, torchcodec,
 
 ARG INSTALL_LIBERO=0
 RUN if [ "${INSTALL_LIBERO}" = "1" ]; then \
-        python -m pip install "lerobot[libero]==0.5.1"; \
+        python -m pip install "lerobot[libero]==0.5.1" \
+        && python -c "from libero.libero import benchmark; from libero.libero.envs import OffScreenRenderEnv; print(sorted(benchmark.get_benchmark_dict()))"; \
     fi
 
 CMD ["bash"]

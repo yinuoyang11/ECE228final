@@ -170,6 +170,46 @@ find runs/pi0_lite_flow/tasks_20_21_22 \
   -name 'checkpoint_step_*.pt' -delete
 ```
 
+## 10. Headless Rollout Videos
+
+Build the image with the Linux-only LIBERO simulator dependencies:
+
+```bash
+INSTALL_LIBERO=1 bash scripts/docker_build.sh
+```
+
+Run headless rollouts on GPU 1 and save a side-by-side agentview and wrist-camera
+MP4 for every episode:
+
+```bash
+docker run --rm --gpus '"device=1"' --ipc=host \
+  --env MUJOCO_GL=egl \
+  --env PYOPENGL_PLATFORM=egl \
+  --volume "$PWD/runs:/workspace/runs" \
+  --volume "$HOME/.cache/huggingface:/cache/huggingface" \
+  ece228-pi0-lite-flow:latest \
+  python scripts/eval_libero_rollout.py \
+    runs/pi0_lite_flow/tasks_20_21_22_bs128/checkpoint_final.pt \
+    --suite libero_object \
+    --task-ids 0 1 2 \
+    --episodes-per-task 10 \
+    --video-view both \
+    --video-dir runs/pi0_lite_flow/tasks_20_21_22_bs128/rollout_videos
+```
+
+The output directory contains videos and aggregate success-rate metrics:
+
+```text
+rollout_videos/
+├── libero_object_task00_episode00_success.mp4
+├── libero_object_task00_episode01_failure.mp4
+└── rollout_metrics.json
+```
+
+The `HuggingFaceVLA/libero` dataset task indices and LIBERO benchmark suite-local
+task ids are different. Dataset tasks `20 21 22` correspond to
+`--suite libero_object --task-ids 0 1 2`.
+
 ## References
 
 - Docker Engine on Ubuntu: https://docs.docker.com/engine/install/ubuntu/
