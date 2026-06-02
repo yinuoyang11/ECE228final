@@ -191,7 +191,7 @@ docker run --rm --gpus '"device=1"' --ipc=host \
   python scripts/eval_libero_rollout.py \
     runs/pi0_lite_flow/tasks_20_21_22_bs128/checkpoint_final.pt \
     --suite libero_object \
-    --task-ids 0 1 2 \
+    --dataset-task-indices 20 21 22 \
     --episodes-per-task 10 \
     --video-view both \
     --video-dir runs/pi0_lite_flow/tasks_20_21_22_bs128/rollout_videos
@@ -207,8 +207,42 @@ rollout_videos/
 ```
 
 The `HuggingFaceVLA/libero` dataset task indices and LIBERO benchmark suite-local
-task ids are different. Dataset tasks `20 21 22` correspond to
-`--suite libero_object --task-ids 0 1 2`.
+task ids are different. Use `--dataset-task-indices` to pass the same global
+indices used for training. The rollout script maps them to suite-local ids by
+instruction text. Use `--task-ids` only when intentionally passing LIBERO
+suite-local ids.
+
+## 11. Fine-Tune CLIP After a Frozen-Encoder Run
+
+Before fine-tuning, rerun the rollout command above with
+`--dataset-task-indices 20 21 22`. Older commands that used
+`--suite libero_object --task-ids 0 1 2` evaluated different tasks.
+
+If the corrected frozen-CLIP rollout still fails to fit the tasks, warm-start
+from the existing checkpoint and unfreeze the final CLIP vision layers. Keep
+the text encoder frozen initially because the main missing signal is usually
+visual control information:
+
+```bash
+nohup env GPU_ID=1 STEPS=5000 MAX_SAMPLES=0 BATCH_SIZE=16 NUM_WORKERS=4 \
+  SAVE_EVERY=0 RUN_NAME=tasks_20_21_22_clip_vision_ft \
+  bash scripts/docker_train.sh \
+    --task-indices 20 21 22 \
+    --init-checkpoint runs/pi0_lite_flow/tasks_20_21_22_bs128/checkpoint_final.pt \
+    --finetune-clip-vision-layers 2 \
+    --finetune-clip-text-layers 0 \
+    --clip-lr 1e-5 \
+  > train_tasks_20_21_22_clip_vision_ft.log 2>&1 &
+```
+
+The fusion layers and flow decoder continue to use `--lr 1e-4`. The unfrozen
+CLIP parameters use the smaller `--clip-lr`. CLIP fine-tuning stores additional
+backbone weights in the checkpoint and uses more GPU memory than frozen-CLIP
+training. Start with `BATCH_SIZE=16` and reduce it if needed.
+
+Use `--finetune-clip-vision-layers -1` only when intentionally fine-tuning the
+entire CLIP vision branch. Fine-tune text layers later only if rollout evidence
+shows language confusion between tasks.
 
 ## References
 

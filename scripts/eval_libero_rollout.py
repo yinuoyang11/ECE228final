@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from huggingface_hub import hf_hub_download
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +41,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Headless LIBERO rollout evaluation with MP4 recording.")
     parser.add_argument("checkpoint")
     parser.add_argument("--suite", default="libero_object")
-    parser.add_argument("--task-ids", nargs="+", type=int, required=True, help="Task ids local to the selected suite.")
+    task_group = parser.add_mutually_exclusive_group(required=True)
+    task_group.add_argument("--task-ids", nargs="+", type=int, help="Task ids local to the selected suite.")
+    task_group.add_argument(
+        "--dataset-task-indices",
+        nargs="+",
+        type=int,
+        help="Global Hugging Face dataset task indices. These are mapped to suite-local ids by instruction text.",
+    )
+    parser.add_argument("--repo-id", default="HuggingFaceVLA/libero")
+    parser.add_argument("--revision", default=None)
     parser.add_argument("--episodes-per-task", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--num-steps", type=int, default=None, help="Flow Euler inference steps.")
@@ -71,12 +81,19 @@ def main() -> None:
     if args.suite not in benchmark_dict:
         raise ValueError(f"Unknown suite {args.suite!r}. Available suites: {sorted(benchmark_dict)}")
     suite = benchmark_dict[args.suite]()
+    task_specs = resolve_task_specs(
+        suite,
+        task_ids=args.task_ids,
+        dataset_task_indices=args.dataset_task_indices,
+        repo_id=args.repo_id,
+        revision=args.revision,
+    )
     max_steps = args.max_steps or DEFAULT_MAX_STEPS.get(args.suite, 500)
     video_dir = Path(args.video_dir) if args.video_dir else Path(args.checkpoint).parent / "rollout_videos"
     video_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
-    for task_id in args.task_ids:
+    for task_id, dataset_task_index in task_specs:
         task = suite.get_task(task_id)
         init_states = load_init_states(suite, task_id, get_libero_path("init_states"))
         bddl_file = Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
@@ -114,6 +131,7 @@ def main() -> None:
             result = {
                 "suite": args.suite,
                 "task_id": task_id,
+                "dataset_task_index": dataset_task_index,
                 "task": task.language,
                 "episode": episode,
                 "success": success,
@@ -126,7 +144,8 @@ def main() -> None:
     metrics = {
         "checkpoint": args.checkpoint,
         "suite": args.suite,
-        "task_ids": args.task_ids,
+        "task_ids": [task_id for task_id, _ in task_specs],
+        "dataset_task_indices": [dataset_task_index for _, dataset_task_index in task_specs],
         "episodes": len(results),
         "successes": sum(int(result["success"]) for result in results),
         "success_rate": sum(int(result["success"]) for result in results) / max(len(results), 1),
@@ -136,6 +155,60 @@ def main() -> None:
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(json.dumps({key: value for key, value in metrics.items() if key != "results"}, indent=2))
     print(f"saved_metrics={metrics_path}")
+
+
+def resolve_task_specs(
+    suite: Any,
+    task_ids: list[int] | None,
+    dataset_task_indices: list[int] | None,
+    repo_id: str,
+    revision: str | None,
+) -> list[tuple[int, int | None]]:
+    if task_ids is not None:
+        return [(task_id, None) for task_id in task_ids]
+    assert dataset_task_indices is not None
+    return map_dataset_tasks_to_suite(suite, dataset_task_indices, read_dataset_tasks(repo_id, revision))
+
+
+def read_dataset_tasks(repo_id: str, revision: str | None) -> list[tuple[int, str]]:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError("pyarrow is required to map dataset task indices to LIBERO suite-local ids") from exc
+
+    path = hf_hub_download(
+        repo_id=repo_id,
+        filename="meta/tasks.parquet",
+        repo_type="dataset",
+        revision=revision,
+    )
+    rows = pq.read_table(path).to_pylist()
+    return [(int(row["task_index"]), str(row["__index_level_0__"])) for row in rows]
+
+
+def map_dataset_tasks_to_suite(
+    suite: Any,
+    dataset_task_indices: list[int],
+    dataset_tasks: list[tuple[int, str]],
+) -> list[tuple[int, int]]:
+    descriptions = dict(dataset_tasks)
+    suite_task_ids = {_normalize_instruction(task.language): task_id for task_id, task in enumerate(suite.tasks)}
+    task_specs = []
+    for dataset_task_index in dataset_task_indices:
+        if dataset_task_index not in descriptions:
+            raise ValueError(f"Unknown dataset task index: {dataset_task_index}")
+        instruction = descriptions[dataset_task_index]
+        task_id = suite_task_ids.get(_normalize_instruction(instruction))
+        if task_id is None:
+            raise ValueError(
+                f"Dataset task {dataset_task_index} ({instruction!r}) is not part of suite {type(suite).__name__}"
+            )
+        task_specs.append((task_id, dataset_task_index))
+    return task_specs
+
+
+def _normalize_instruction(instruction: str) -> str:
+    return " ".join(instruction.lower().split())
 
 
 def load_model(

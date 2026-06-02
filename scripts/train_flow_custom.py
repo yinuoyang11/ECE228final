@@ -40,16 +40,21 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--use-clip", action="store_true", help="Use frozen CLIP image/text encoders instead of mocks.")
+    parser.add_argument("--use-clip", action="store_true", help="Use CLIP image/text encoders instead of mocks.")
     parser.add_argument("--clip-model", default="openai/clip-vit-base-patch32")
+    parser.add_argument("--finetune-clip-vision-layers", type=int, default=0, help="Unfreeze the last N CLIP vision layers. Use -1 for all.")
+    parser.add_argument("--finetune-clip-text-layers", type=int, default=0, help="Unfreeze the last N CLIP text layers. Use -1 for all.")
+    parser.add_argument("--clip-lr", type=float, default=1e-5, help="Learning rate for unfrozen CLIP parameters.")
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--output-dir", default="runs/pi0_lite_flow")
     parser.add_argument("--run-name", default=None)
+    parser.add_argument("--init-checkpoint", default=None, help="Initialize encoder and policy weights from a checkpoint.")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--clip-grad-norm", type=float, default=1.0)
     args = parser.parse_args()
+    validate_clip_args(args)
 
     set_seed(args.seed)
     device = torch.device(args.device)
@@ -68,8 +73,14 @@ def main() -> None:
     image_dim = 512
     text_dim = 512
     if args.use_clip:
-        image_encoder = CLIPImageEncoder(args.clip_model, freeze=True)
-        text_encoder = CLIPTextEncoder(args.clip_model, freeze=True)
+        image_encoder = CLIPImageEncoder(
+            args.clip_model,
+            trainable_layers=args.finetune_clip_vision_layers,
+        )
+        text_encoder = CLIPTextEncoder(
+            args.clip_model,
+            trainable_layers=args.finetune_clip_text_layers,
+        )
         image_dim = image_encoder.output_dim
         text_dim = text_encoder.output_dim
 
@@ -91,14 +102,33 @@ def main() -> None:
             cond_dim=args.cond_dim,
         )
     ).to(device)
+    if args.init_checkpoint:
+        load_initial_weights(Path(args.init_checkpoint), encoder, policy, device)
 
-    trainable_params = [param for param in list(encoder.parameters()) + list(policy.parameters()) if param.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+    clip_params = [
+        param
+        for name, param in encoder.named_parameters()
+        if param.requires_grad and _is_clip_backbone_key(name)
+    ]
+    base_params = [
+        param
+        for name, param in encoder.named_parameters()
+        if param.requires_grad and not _is_clip_backbone_key(name)
+    ]
+    base_params.extend(param for param in policy.parameters() if param.requires_grad)
+    trainable_params = [*base_params, *clip_params]
+    optimizer_groups = [{"params": base_params, "lr": args.lr}]
+    if clip_params:
+        optimizer_groups.append({"params": clip_params, "lr": args.clip_lr})
+    optimizer = torch.optim.AdamW(optimizer_groups, weight_decay=args.weight_decay)
 
     encoder.train()
     policy.train()
     print(f"run_dir={run_dir}")
-    print(f"device={device} trainable_params={sum(param.numel() for param in trainable_params)}")
+    print(
+        f"device={device} trainable_params={sum(param.numel() for param in trainable_params)} "
+        f"clip_trainable_params={sum(param.numel() for param in clip_params)}"
+    )
     step = 0
     while step < args.steps:
         for batch in loader:
@@ -156,6 +186,16 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def validate_clip_args(args: argparse.Namespace) -> None:
+    layer_counts = (args.finetune_clip_vision_layers, args.finetune_clip_text_layers)
+    if any(layer_count < -1 for layer_count in layer_counts):
+        raise ValueError("CLIP finetune layer counts must be -1, 0, or positive integers")
+    if any(layer_counts) and not args.use_clip:
+        raise ValueError("CLIP finetuning requires --use-clip")
+    if args.clip_lr <= 0:
+        raise ValueError("clip-lr must be positive")
+
+
 def make_run_dir(output_dir: str, run_name: str | None) -> Path:
     root = Path(output_dir)
     name = run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -202,6 +242,20 @@ def save_checkpoint(
         path,
     )
     print(f"saved_checkpoint={path}")
+
+
+def load_initial_weights(
+    path: Path,
+    encoder: RepresentationEncoder,
+    policy: PI0LiteFlowPolicy,
+    device: torch.device,
+) -> None:
+    checkpoint = torch.load(path, map_location=device)
+    _, unexpected = encoder.load_state_dict(checkpoint["encoder"], strict=False)
+    if unexpected:
+        raise RuntimeError(f"Unexpected encoder checkpoint keys: {unexpected}")
+    policy.load_state_dict(checkpoint["policy"])
+    print(f"initialized_from={path}")
 
 
 def trainable_state_dict(module: torch.nn.Module) -> dict[str, torch.Tensor]:

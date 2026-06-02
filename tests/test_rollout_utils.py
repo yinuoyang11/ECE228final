@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -27,3 +28,20 @@ def test_rotate_image_flips_height_and_width():
     image = np.arange(12).reshape(2, 2, 3)
 
     assert np.array_equal(ROLLOUT.rotate_image(image), image[::-1, ::-1])
+
+
+def test_map_dataset_tasks_to_suite_uses_instruction_instead_of_index():
+    suite = SimpleNamespace(
+        tasks=[
+            SimpleNamespace(language="pick up alphabet soup"),
+            SimpleNamespace(language="pick up orange juice"),
+        ]
+    )
+
+    task_specs = ROLLOUT.map_dataset_tasks_to_suite(
+        suite,
+        dataset_task_indices=[20],
+        dataset_tasks=[(20, "pick  up   orange juice")],
+    )
+
+    assert task_specs == [(1, 20)]

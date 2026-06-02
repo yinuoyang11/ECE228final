@@ -95,9 +95,14 @@ class MockTextEncoder(nn.Module):
 
 
 class CLIPImageEncoder(nn.Module):
-    """Frozen CLIP image encoder backed by Hugging Face transformers."""
+    """CLIP image encoder backed by Hugging Face transformers."""
 
-    def __init__(self, model_name: str = "openai/clip-vit-base-patch32", freeze: bool = True) -> None:
+    def __init__(
+        self,
+        model_name: str = "openai/clip-vit-base-patch32",
+        freeze: bool = True,
+        trainable_layers: int | None = None,
+    ) -> None:
         super().__init__()
         try:
             from transformers import CLIPModel
@@ -106,10 +111,14 @@ class CLIPImageEncoder(nn.Module):
 
         self.model = CLIPModel.from_pretrained(model_name)
         self.output_dim = self.model.config.projection_dim
-        if freeze:
-            self.model.eval()
-            for param in self.model.parameters():
-                param.requires_grad = False
+        trainable_layers = 0 if freeze and trainable_layers is None else trainable_layers
+        _set_clip_branch_trainable(
+            self.model,
+            branch_name="vision_model",
+            projection_name="visual_projection",
+            final_norm_name="post_layernorm",
+            trainable_layers=-1 if trainable_layers is None else trainable_layers,
+        )
 
     def forward(self, images: Tensor) -> Tensor:
         if images.ndim != 5:
@@ -126,9 +135,14 @@ class CLIPImageEncoder(nn.Module):
 
 
 class CLIPTextEncoder(nn.Module):
-    """Frozen CLIP text encoder backed by Hugging Face transformers."""
+    """CLIP text encoder backed by Hugging Face transformers."""
 
-    def __init__(self, model_name: str = "openai/clip-vit-base-patch32", freeze: bool = True) -> None:
+    def __init__(
+        self,
+        model_name: str = "openai/clip-vit-base-patch32",
+        freeze: bool = True,
+        trainable_layers: int | None = None,
+    ) -> None:
         super().__init__()
         try:
             from transformers import CLIPModel, CLIPTokenizer
@@ -138,10 +152,14 @@ class CLIPTextEncoder(nn.Module):
         self.model = CLIPModel.from_pretrained(model_name)
         self.tokenizer = CLIPTokenizer.from_pretrained(model_name)
         self.output_dim = self.model.config.projection_dim
-        if freeze:
-            self.model.eval()
-            for param in self.model.parameters():
-                param.requires_grad = False
+        trainable_layers = 0 if freeze and trainable_layers is None else trainable_layers
+        _set_clip_branch_trainable(
+            self.model,
+            branch_name="text_model",
+            projection_name="text_projection",
+            final_norm_name="final_layer_norm",
+            trainable_layers=-1 if trainable_layers is None else trainable_layers,
+        )
 
     def forward(self, instructions: Sequence[str], device: torch.device | None = None) -> Tensor:
         encoded = self.tokenizer(list(instructions), padding=True, truncation=True, return_tensors="pt")
@@ -260,3 +278,34 @@ def _clip_output_to_tensor(output: Any, projection: nn.Module | None = None) -> 
             return projection(pooled)
         return pooled
     raise TypeError(f"Unsupported CLIP output type: {type(output).__name__}")
+
+
+def _set_clip_branch_trainable(
+    model: nn.Module,
+    branch_name: str,
+    projection_name: str,
+    final_norm_name: str,
+    trainable_layers: int,
+) -> None:
+    if trainable_layers < -1:
+        raise ValueError("trainable_layers must be -1, 0, or a positive integer")
+
+    for param in model.parameters():
+        param.requires_grad = False
+    if trainable_layers == 0:
+        model.eval()
+        return
+
+    branch = getattr(model, branch_name)
+    projection = getattr(model, projection_name)
+    if trainable_layers == -1:
+        modules = [branch, projection]
+    else:
+        layers = branch.encoder.layers
+        if trainable_layers > len(layers):
+            raise ValueError(f"Cannot unfreeze {trainable_layers} layers; {branch_name} only has {len(layers)}")
+        modules = [*layers[-trainable_layers:], getattr(branch, final_norm_name), projection]
+
+    for module in modules:
+        for param in module.parameters():
+            param.requires_grad = True

@@ -1,4 +1,5 @@
 import torch
+from torch import nn
 
 from lerobot_policy_pi0_lite_flow.configuration_pi0_lite_flow import PI0LiteFlowConfig
 from lerobot_policy_pi0_lite_flow.libero_adapter import LIBEROActionChunkDataset, libero_samples_to_encoder_batch
@@ -6,6 +7,7 @@ from lerobot_policy_pi0_lite_flow.modeling_pi0_lite_flow import ACTION, COND_KEY
 from lerobot_policy_pi0_lite_flow.representation_encoder import (
     RepresentationEncoder,
     RepresentationEncoderConfig,
+    _set_clip_branch_trainable,
     preprocess_clip_images,
 )
 
@@ -146,3 +148,34 @@ def test_action_chunk_dataset_filters_tasks_without_changing_episode_chunks():
     assert len(dataset) == 2
     assert dataset[0]["instruction"] == "task 1"
     assert dataset[0]["action"][:, 0].tolist() == [3.0, 4.0]
+
+
+class FakeCLIPBranch(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encoder = nn.Module()
+        self.encoder.layers = nn.ModuleList([nn.Linear(2, 2) for _ in range(3)])
+        self.post_layernorm = nn.LayerNorm(2)
+        self.final_layer_norm = nn.LayerNorm(2)
+
+
+class FakeCLIPModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.vision_model = FakeCLIPBranch()
+        self.text_model = FakeCLIPBranch()
+        self.visual_projection = nn.Linear(2, 2)
+        self.text_projection = nn.Linear(2, 2)
+
+
+def test_clip_finetune_only_unfreezes_selected_branch_layers():
+    model = FakeCLIPModel()
+
+    _set_clip_branch_trainable(model, "vision_model", "visual_projection", "post_layernorm", trainable_layers=1)
+
+    assert not any(param.requires_grad for param in model.text_model.parameters())
+    assert not any(param.requires_grad for param in model.vision_model.encoder.layers[0].parameters())
+    assert not any(param.requires_grad for param in model.vision_model.encoder.layers[1].parameters())
+    assert all(param.requires_grad for param in model.vision_model.encoder.layers[2].parameters())
+    assert all(param.requires_grad for param in model.vision_model.post_layernorm.parameters())
+    assert all(param.requires_grad for param in model.visual_projection.parameters())
