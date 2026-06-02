@@ -45,3 +45,17 @@ def test_map_dataset_tasks_to_suite_uses_instruction_instead_of_index():
     )
 
     assert task_specs == [(1, 20)]
+
+
+def test_summarize_action_trace_reports_gripper_close_fraction():
+    actions = [
+        np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]),
+        np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+    ]
+
+    summary = ROLLOUT.summarize_action_trace(actions)
+
+    assert summary["gripper_min"] == -1.0
+    assert summary["gripper_max"] == 1.0
+    assert summary["gripper_mean"] == 0.0
+    assert summary["gripper_close_fraction"] == 0.5

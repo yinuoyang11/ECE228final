@@ -244,6 +244,20 @@ Use `--finetune-clip-vision-layers -1` only when intentionally fine-tuning the
 entire CLIP vision branch. Fine-tune text layers later only if rollout evidence
 shows language confusion between tasks.
 
+## 12. Diagnose Grasp Failures
+
+New training runs read `meta/stats.json` from the Hugging Face dataset and
+normalize all seven action dimensions before flow matching. Older checkpoints
+were trained without these dataset statistics, so retrain from scratch when
+comparing the normalized action pipeline.
+
+The rollout JSON for each episode includes `gripper_min`, `gripper_max`,
+`gripper_mean`, and `gripper_close_fraction`. LIBERO uses positive gripper
+actions to close and negative values to open. Rollout clips sampled actions to
+the LIBERO environment range `[-1, 1]`. Offline evaluation also reports
+separate position, rotation, and gripper MSE values plus
+`gripper_sign_accuracy`.
+
 ## References
 
 - Docker Engine on Ubuntu: https://docs.docker.com/engine/install/ubuntu/

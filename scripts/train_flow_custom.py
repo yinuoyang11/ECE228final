@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 
 import torch
+from huggingface_hub import hf_hub_download
 from torch.utils.data import DataLoader, Subset
 
 
@@ -100,7 +101,8 @@ def main() -> None:
             horizon=args.horizon,
             action_dim=args.action_dim,
             cond_dim=args.cond_dim,
-        )
+        ),
+        dataset_stats={ACTION: load_action_stats(args.repo_id)},
     ).to(device)
     if args.init_checkpoint:
         load_initial_weights(Path(args.init_checkpoint), encoder, policy, device)
@@ -212,6 +214,18 @@ def make_run_dir(output_dir: str, run_name: str | None) -> Path:
 def save_args(args: argparse.Namespace, run_dir: Path) -> None:
     with (run_dir / "args.json").open("w", encoding="utf-8") as file:
         json.dump(vars(args), file, indent=2, sort_keys=True)
+
+
+def load_action_stats(repo_id: str) -> dict[str, torch.Tensor]:
+    path = hf_hub_download(repo_id=repo_id, filename="meta/stats.json", repo_type="dataset")
+    with open(path, encoding="utf-8") as file:
+        stats = json.load(file)["action"]
+    action_stats = {key: torch.tensor(stats[key], dtype=torch.float32) for key in ("mean", "std")}
+    print(
+        f"action_mean={action_stats['mean'].tolist()} "
+        f"action_std={action_stats['std'].tolist()}"
+    )
+    return action_stats
 
 
 def append_metrics(path: Path, row: dict[str, int | float | str]) -> None:

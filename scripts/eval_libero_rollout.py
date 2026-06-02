@@ -107,6 +107,7 @@ def main() -> None:
                 obs = reset_env(env, init_states[episode % len(init_states)], args.seed + episode, args.warmup_steps)
                 policy.reset()
                 frames = []
+                action_trace = []
                 success = False
                 steps = 0
                 for steps in range(1, max_steps + 1):
@@ -115,7 +116,9 @@ def main() -> None:
                     with torch.no_grad():
                         cond = encoder(batch)
                         action = policy.select_action({COND_KEY: cond}, num_steps=policy.config.inference_steps)
-                    obs, _, done, _ = env.step(action[0].detach().cpu().numpy())
+                    action_numpy = np.clip(action[0].detach().cpu().numpy(), -1.0, 1.0)
+                    action_trace.append(action_numpy)
+                    obs, _, done, _ = env.step(action_numpy)
                     success = bool(done or env.check_success())
                     if success:
                         frames.append(make_video_frame(obs, args.video_view))
@@ -136,6 +139,7 @@ def main() -> None:
                 "episode": episode,
                 "success": success,
                 "steps": steps,
+                **summarize_action_trace(action_trace),
                 "video": str(video_path),
             }
             results.append(result)
@@ -209,6 +213,19 @@ def map_dataset_tasks_to_suite(
 
 def _normalize_instruction(instruction: str) -> str:
     return " ".join(instruction.lower().split())
+
+
+def summarize_action_trace(action_trace: list[np.ndarray]) -> dict[str, float]:
+    actions = np.asarray(action_trace)
+    if actions.ndim != 2 or actions.shape[1] != 7:
+        raise ValueError(f"Expected action trace with shape (T, 7), got {actions.shape}")
+    gripper = actions[:, 6]
+    return {
+        "gripper_min": float(gripper.min()),
+        "gripper_max": float(gripper.max()),
+        "gripper_mean": float(gripper.mean()),
+        "gripper_close_fraction": float((gripper >= 0).mean()),
+    }
 
 
 def load_model(

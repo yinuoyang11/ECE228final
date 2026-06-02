@@ -100,8 +100,15 @@ def main() -> None:
     totals = {
         "mse_sum": 0.0,
         "l1_sum": 0.0,
+        "position_mse_sum": 0.0,
+        "rotation_mse_sum": 0.0,
+        "gripper_mse_sum": 0.0,
+        "gripper_sign_correct": 0,
         "smoothness_sum": 0.0,
         "num_values": 0,
+        "num_position_values": 0,
+        "num_rotation_values": 0,
+        "num_gripper_values": 0,
         "num_smooth_values": 0,
         "num_batches": 0,
         "latency_sum": 0.0,
@@ -127,6 +134,13 @@ def main() -> None:
             totals["mse_sum"] += float(squared.sum().cpu())
             totals["l1_sum"] += float(absolute.sum().cpu())
             totals["num_values"] += int(valid.sum().item() * expert.shape[-1])
+            totals["position_mse_sum"] += float(squared[..., :3].sum().cpu())
+            totals["rotation_mse_sum"] += float(squared[..., 3:6].sum().cpu())
+            totals["gripper_mse_sum"] += float(squared[..., 6].sum().cpu())
+            totals["gripper_sign_correct"] += int(((pred[..., 6] >= 0) == (expert[..., 6] >= 0))[valid].sum().item())
+            totals["num_position_values"] += int(valid.sum().item() * 3)
+            totals["num_rotation_values"] += int(valid.sum().item() * 3)
+            totals["num_gripper_values"] += int(valid.sum().item())
 
             if expert.shape[1] > 1:
                 pred_delta = pred[:, 1:] - pred[:, :-1]
@@ -146,6 +160,10 @@ def main() -> None:
         "num_samples": end - start,
         "mse": totals["mse_sum"] / max(totals["num_values"], 1),
         "l1": totals["l1_sum"] / max(totals["num_values"], 1),
+        "position_mse": totals["position_mse_sum"] / max(totals["num_position_values"], 1),
+        "rotation_mse": totals["rotation_mse_sum"] / max(totals["num_rotation_values"], 1),
+        "gripper_mse": totals["gripper_mse_sum"] / max(totals["num_gripper_values"], 1),
+        "gripper_sign_accuracy": totals["gripper_sign_correct"] / max(totals["num_gripper_values"], 1),
         "smoothness": totals["smoothness_sum"] / max(totals["num_smooth_values"], 1),
         "latency_sec_per_sample": totals["latency_sum"] / max(totals["num_batches"], 1),
     }
