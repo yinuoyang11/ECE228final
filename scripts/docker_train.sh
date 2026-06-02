@@ -9,6 +9,7 @@ MAX_SAMPLES="${MAX_SAMPLES:-0}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 RUN_NAME="${RUN_NAME:-clip_flow_h16_docker}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+SAVE_EVERY="${SAVE_EVERY:-5000}"
 GPU_ID="${GPU_ID:-all}"
 GPU_REQUEST="${GPU_ID}"
 if [[ "${GPU_ID}" != "all" ]]; then
@@ -34,6 +35,6 @@ docker run --rm \
     --batch-size "${BATCH_SIZE}" \
     --num-workers "${NUM_WORKERS}" \
     --lr 1e-4 \
-    --save-every 250 \
+    --save-every "${SAVE_EVERY}" \
     --run-name "${RUN_NAME}" \
     "$@"

@@ -109,17 +109,19 @@ all GPUs.
 Start with a small related task group:
 
 ```bash
-GPU_ID=1 STEPS=10000 MAX_SAMPLES=0 BATCH_SIZE=8 RUN_NAME=tasks_20_21_22 \
+GPU_ID=1 STEPS=10000 MAX_SAMPLES=0 BATCH_SIZE=8 SAVE_EVERY=5000 RUN_NAME=tasks_20_21_22 \
   bash scripts/docker_train.sh --task-indices 20 21 22
 ```
 
 `MAX_SAMPLES=0` means that all frames from the selected tasks are eligible for
 sampling. Task indices 20, 21, and 22 are basket pick-and-place tasks.
+`SAVE_EVERY=5000` writes an intermediate checkpoint every 5000 optimizer steps.
+Set `SAVE_EVERY=0` to keep only `checkpoint_final.pt`.
 
 ## 8. Train All Tasks
 
 ```bash
-STEPS=100000 MAX_SAMPLES=0 BATCH_SIZE=8 RUN_NAME=clip_flow_full \
+STEPS=100000 MAX_SAMPLES=0 BATCH_SIZE=8 SAVE_EVERY=10000 RUN_NAME=clip_flow_full \
   bash scripts/docker_train.sh
 ```
 
@@ -145,14 +147,27 @@ runs/pi0_lite_flow/<run-name>/
 Run held-out offline evaluation:
 
 ```bash
-docker run --rm --gpus all --ipc=host \
+docker run --rm --gpus '"device=1"' --ipc=host \
   --volume "$PWD/runs:/workspace/runs" \
   --volume "$HOME/.cache/huggingface:/cache/huggingface" \
   ece228-pi0-lite-flow:latest \
   python scripts/eval_flow_custom.py \
     runs/pi0_lite_flow/tasks_20_21_22/checkpoint_final.pt \
     --num-samples 512 \
-    --batch-size 8
+    --batch-size 128 \
+    --output runs/pi0_lite_flow/tasks_20_21_22/eval.csv
+```
+
+This is offline held-out action prediction evaluation. It reports action MSE,
+L1 error, predicted action smoothness, and latency. It does not launch the
+LIBERO simulator or measure task success rate.
+
+Delete intermediate checkpoints after a completed run while keeping the final
+model:
+
+```bash
+find runs/pi0_lite_flow/tasks_20_21_22 \
+  -name 'checkpoint_step_*.pt' -delete
 ```
 
 ## References
