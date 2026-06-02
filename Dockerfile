@@ -40,10 +40,11 @@ WORKDIR /workspace
 COPY . .
 
 RUN python -m pip install -r requirements.txt
+RUN python -c "import torch, transformers; from transformers import CLIPModel, CLIPTokenizer; print(f'torch={torch.__version__} transformers={transformers.__version__}')"
 
 ARG INSTALL_LIBERO=0
 RUN if [ "${INSTALL_LIBERO}" = "1" ]; then \
-        python -m pip install "lerobot[libero]>=0.5.1"; \
+        python -m pip install "lerobot[libero]==0.5.1"; \
     fi
 
 CMD ["bash"]

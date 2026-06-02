@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "torch>=2.2",
     "einops>=0.7",
-    "lerobot>=0.5.1",
+    "lerobot==0.5.1",
 ]
 
 [project.optional-dependencies]
@@ -19,7 +19,7 @@ dev = [
     "pytest>=8.0",
 ]
 encoder = [
-    "transformers>=4.45",
+    "transformers==5.3.0",
     "torchvision>=0.17",
     "datasets>=2.19",
     "huggingface-hub>=0.23",
