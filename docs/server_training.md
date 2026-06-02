@@ -96,18 +96,20 @@ The current dataset contains 40 tasks, 1693 episodes, and 273465 frames.
 This downloads the required dataset shards and CLIP weights on first use:
 
 ```bash
-STEPS=3 MAX_SAMPLES=16 BATCH_SIZE=2 RUN_NAME=smoke \
+GPU_ID=1 STEPS=3 MAX_SAMPLES=16 BATCH_SIZE=2 RUN_NAME=smoke \
   bash scripts/docker_train.sh
 ```
 
 Check that `runs/pi0_lite_flow/smoke/checkpoint_final.pt` exists.
+Set `GPU_ID=1` to expose only host GPU 1 to the container. Omit it to expose
+all GPUs.
 
 ## 7. Train Selected Tasks
 
 Start with a small related task group:
 
 ```bash
-STEPS=10000 MAX_SAMPLES=0 BATCH_SIZE=8 RUN_NAME=tasks_20_21_22 \
+GPU_ID=1 STEPS=10000 MAX_SAMPLES=0 BATCH_SIZE=8 RUN_NAME=tasks_20_21_22 \
   bash scripts/docker_train.sh --task-indices 20 21 22
 ```
 

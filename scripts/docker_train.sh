@@ -9,11 +9,16 @@ MAX_SAMPLES="${MAX_SAMPLES:-0}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 RUN_NAME="${RUN_NAME:-clip_flow_h16_docker}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+GPU_ID="${GPU_ID:-all}"
+GPU_REQUEST="${GPU_ID}"
+if [[ "${GPU_ID}" != "all" ]]; then
+  GPU_REQUEST="device=${GPU_ID}"
+fi
 
 mkdir -p "${ROOT}/runs" "${HF_CACHE}"
 
 docker run --rm \
-  --gpus all \
+  --gpus "${GPU_REQUEST}" \
   --ipc=host \
   --user "$(id -u):$(id -g)" \
   --volume "${ROOT}/runs:/workspace/runs" \
