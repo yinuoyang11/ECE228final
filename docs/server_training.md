@@ -224,7 +224,7 @@ the text encoder frozen initially because the main missing signal is usually
 visual control information:
 
 ```bash
-nohup env GPU_ID=1 STEPS=5000 MAX_SAMPLES=0 BATCH_SIZE=16 NUM_WORKERS=4 \
+nohup env GPU_ID=1 STEPS=5000 MAX_SAMPLES=0 BATCH_SIZE=16 NUM_WORKERS=0 \
   SAVE_EVERY=0 RUN_NAME=tasks_20_21_22_clip_vision_ft \
   bash scripts/docker_train.sh \
     --task-indices 20 21 22 \
