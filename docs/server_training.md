@@ -258,6 +258,59 @@ the LIBERO environment range `[-1, 1]`. Offline evaluation also reports
 separate position, rotation, and gripper MSE values plus
 `gripper_sign_accuracy`.
 
+## 13. QwenVL Token Flow Experiment
+
+The QwenVL path is separate from the CLIP path. It freezes
+`Qwen/Qwen2.5-VL-3B-Instruct`, feeds its vision-language tokens into a
+cross-attention flow action head, and saves only the action head weights.
+Rebuild the image after pulling this code because it adds `qwen-vl-utils`:
+
+```bash
+git pull origin Encoder
+INSTALL_LIBERO=1 bash scripts/docker_build.sh
+```
+
+Run a two-step smoke test on GPU 1:
+
+```bash
+mkdir -p "$PWD/.hf_cache"
+HF_CACHE="$PWD/.hf_cache" GPU_ID=1 STEPS=2 MAX_SAMPLES=4 BATCH_SIZE=1 \
+  GRAD_ACCUM_STEPS=1 SAVE_EVERY=0 RUN_NAME=qwenvl_smoke \
+  bash scripts/docker_train_qwenvl.sh --task-indices 20
+```
+
+The log should include `qwen_trainable_params=0`,
+`head_trainable_params=...`, `context_tokens_shape=(B, N, D)`, and `loss=...`.
+
+Train the first single-task experiment:
+
+```bash
+nohup env HF_CACHE="$PWD/.hf_cache" GPU_ID=1 STEPS=10000 MAX_SAMPLES=0 \
+  BATCH_SIZE=1 GRAD_ACCUM_STEPS=16 NUM_WORKERS=0 SAVE_EVERY=0 \
+  RUN_NAME=qwenvl_task20 \
+  bash scripts/docker_train_qwenvl.sh --task-indices 20 \
+  > train_qwenvl_task20.log 2>&1 &
+```
+
+Run LIBERO rollout videos:
+
+```bash
+docker run --rm --gpus '"device=1"' --ipc=host \
+  --env HF_HOME=/cache/huggingface \
+  --env MUJOCO_GL=egl \
+  --env PYOPENGL_PLATFORM=egl \
+  --volume "$PWD/runs:/workspace/runs" \
+  --volume "$PWD/.hf_cache:/cache/huggingface" \
+  ece228-pi0-lite-flow:latest \
+  python scripts/eval_qwenvl_libero_rollout.py \
+    runs/qwenvl_flow/qwenvl_task20/checkpoint_final.pt \
+    --suite libero_object \
+    --dataset-task-indices 20 \
+    --episodes-per-task 10 \
+    --video-view both \
+    --video-dir runs/qwenvl_flow/qwenvl_task20/rollout_videos
+```
+
 ## References
 
 - Docker Engine on Ubuntu: https://docs.docker.com/engine/install/ubuntu/
