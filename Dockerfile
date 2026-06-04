@@ -53,7 +53,8 @@ RUN python -m pip install robosuite==1.4.0
 # Clone and install; skip bddl/init_states download at build time –
 # they are bundled with the package via the libero.libero module.
 RUN git clone --depth 1 https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO \
- && python -m pip install -e /opt/LIBERO
+ && python -m pip install -e /opt/LIBERO \
+ && python -c "import libero; from libero.libero import benchmark; print('libero=' + libero.__file__); print(sorted(benchmark.get_benchmark_dict()))"
 
 # ── project Python deps ───────────────────────────────────────────────────────
 WORKDIR /workspace
