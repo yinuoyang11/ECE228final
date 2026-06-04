@@ -1,0 +1,6 @@
+# Requires Python >= 3.12.
+# Install the local package with training, CLIP encoder, LIBERO, and test dependencies.
+-e .[dev,encoder]
+
+# Used by scripts/plot_metrics.py.
+matplotlib>=3.8
