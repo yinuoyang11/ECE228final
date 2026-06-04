@@ -1,6 +1,7 @@
 .git
 .pytest_cache
 .hf_cache
+.torch_cache
 .cache
 .venv
 __pycache__

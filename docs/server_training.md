@@ -295,12 +295,18 @@ nohup env HF_CACHE="$PWD/.hf_cache" GPU_ID=1 STEPS=10000 MAX_SAMPLES=0 \
 Run LIBERO rollout videos:
 
 ```bash
+mkdir -p "$PWD/.torch_cache/kernels"
 docker run --rm --gpus '"device=1"' --ipc=host \
+  --env HOME=/workspace \
   --env HF_HOME=/cache/huggingface \
+  --env TORCH_HOME=/cache/torch \
+  --env XDG_CACHE_HOME=/cache \
+  --env PYTORCH_KERNEL_CACHE_PATH=/cache/torch/kernels \
   --env MUJOCO_GL=egl \
   --env PYOPENGL_PLATFORM=egl \
   --volume "$PWD/runs:/workspace/runs" \
   --volume "$PWD/.hf_cache:/cache/huggingface" \
+  --volume "$PWD/.torch_cache:/cache/torch" \
   ece228-pi0-lite-flow:latest \
   python scripts/eval_qwenvl_libero_rollout.py \
     runs/qwenvl_flow/qwenvl_task20/checkpoint_final.pt \

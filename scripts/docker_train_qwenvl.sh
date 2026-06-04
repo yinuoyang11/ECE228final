@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${IMAGE:-ece228-pi0-lite-flow:latest}"
 HF_CACHE="${HF_CACHE:-${HOME}/.cache/huggingface}"
+TORCH_CACHE="${TORCH_CACHE:-${ROOT}/.torch_cache}"
 STEPS="${STEPS:-1000}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -17,7 +18,7 @@ if [[ "${GPU_ID}" != "all" ]]; then
   GPU_REQUEST="device=${GPU_ID}"
 fi
 
-mkdir -p "${ROOT}/runs" "${HF_CACHE}" "${HF_CACHE}/hub/.locks"
+mkdir -p "${ROOT}/runs" "${HF_CACHE}" "${HF_CACHE}/hub/.locks" "${TORCH_CACHE}" "${TORCH_CACHE}/kernels"
 
 check_writable_dir() {
   local dir="$1"
@@ -34,6 +35,8 @@ check_writable_dir() {
 check_writable_dir "${HF_CACHE}"
 check_writable_dir "${HF_CACHE}/hub"
 check_writable_dir "${HF_CACHE}/hub/.locks"
+check_writable_dir "${TORCH_CACHE}"
+check_writable_dir "${TORCH_CACHE}/kernels"
 
 docker run --rm \
   --gpus "${GPU_REQUEST}" \
@@ -41,7 +44,12 @@ docker run --rm \
   --user "$(id -u):$(id -g)" \
   --volume "${ROOT}/runs:/workspace/runs" \
   --volume "${HF_CACHE}:/cache/huggingface" \
+  --volume "${TORCH_CACHE}:/cache/torch" \
+  --env HOME=/workspace \
   --env HF_HOME=/cache/huggingface \
+  --env TORCH_HOME=/cache/torch \
+  --env XDG_CACHE_HOME=/cache \
+  --env PYTORCH_KERNEL_CACHE_PATH=/cache/torch/kernels \
   --env MUJOCO_GL=egl \
   --env PYOPENGL_PLATFORM=egl \
   "${IMAGE}" \
