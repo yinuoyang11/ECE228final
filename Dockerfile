@@ -25,7 +25,7 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 # ── system packages ───────────────────────────────────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 python3.12-dev python3.12-venv python3-pip \
+        python3.12 python3.12-dev python3.12-venv \
         git curl wget ca-certificates \
         ffmpeg \
         # MuJoCo / EGL headless rendering
@@ -37,23 +37,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Make python3.12 the default python/pip.
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 \
- && python -m pip install --upgrade pip setuptools wheel --break-system-packages
+ENV PATH=/opt/venv/bin:${PATH}
+RUN python3.12 -m venv /opt/venv \
+ && python -m pip install --upgrade pip setuptools wheel
 
 # ── MuJoCo 2.3.7 ─────────────────────────────────────────────────────────────
 # robosuite 1.4.0 expects mujoco >= 2.3.2
-RUN python -m pip install mujoco==2.3.7 --break-system-packages
+RUN python -m pip install mujoco==2.3.7
 
 # ── robosuite 1.4.0 ───────────────────────────────────────────────────────────
 # LIBERO requires exactly this version
-RUN python -m pip install robosuite==1.4.0 --break-system-packages
+RUN python -m pip install robosuite==1.4.0
 
 # ── LIBERO (from source) ──────────────────────────────────────────────────────
 # Clone and install; skip bddl/init_states download at build time –
 # they are bundled with the package via the libero.libero module.
 RUN git clone --depth 1 https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO \
- && python -m pip install -e /opt/LIBERO --break-system-packages
+ && python -m pip install -e /opt/LIBERO
 
 # ── project Python deps ───────────────────────────────────────────────────────
 WORKDIR /workspace
@@ -62,8 +62,8 @@ COPY src ./src
 
 # Install project with all extras (encoder + dev) but WITHOUT robosuite/mujoco
 # overrides – those are already installed above.
-RUN python -m pip install -e ".[dev,encoder]" --break-system-packages \
- && python -m pip install matplotlib pyarrow --break-system-packages
+RUN python -m pip install -e ".[dev,encoder]" \
+ && python -m pip install matplotlib pyarrow
 
 # ── copy remaining source ─────────────────────────────────────────────────────
 COPY scripts ./scripts
