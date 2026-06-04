@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # BC Regression — LIBERO Simulation Rollout
 #
-# Base:  CUDA 12.1 + cuDNN 8 + Ubuntu 22.04
+# Base:  CUDA 12.8 + cuDNN + Ubuntu 24.04
 # Uses:  MuJoCo 2.3.7, robosuite 1.4.0, LIBERO (cloned at build time),
 #        Python 3.12, ffmpeg for MP4 recording
 #
@@ -20,7 +20,7 @@
 #       --video-dir results/sim_rollout \
 #       --device cuda
 # ─────────────────────────────────────────────────────────────────────────────
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
 # ── system packages ───────────────────────────────────────────────────────────
 ENV DEBIAN_FRONTEND=noninteractive
@@ -37,24 +37,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Make python3.12 the default python/pip
+# Make python3.12 the default python/pip.
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 \
- && update-alternatives --install /usr/bin/pip    pip    /usr/bin/pip3      1 \
- && pip install --upgrade pip setuptools wheel
+ && python -m pip install --upgrade pip setuptools wheel --break-system-packages
 
 # ── MuJoCo 2.3.7 ─────────────────────────────────────────────────────────────
 # robosuite 1.4.0 expects mujoco >= 2.3.2
-RUN pip install mujoco==2.3.7
+RUN python -m pip install mujoco==2.3.7 --break-system-packages
 
 # ── robosuite 1.4.0 ───────────────────────────────────────────────────────────
 # LIBERO requires exactly this version
-RUN pip install robosuite==1.4.0
+RUN python -m pip install robosuite==1.4.0 --break-system-packages
 
 # ── LIBERO (from source) ──────────────────────────────────────────────────────
 # Clone and install; skip bddl/init_states download at build time –
 # they are bundled with the package via the libero.libero module.
 RUN git clone --depth 1 https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO \
- && pip install -e /opt/LIBERO
+ && python -m pip install -e /opt/LIBERO --break-system-packages
 
 # ── project Python deps ───────────────────────────────────────────────────────
 WORKDIR /workspace
@@ -63,8 +62,8 @@ COPY src ./src
 
 # Install project with all extras (encoder + dev) but WITHOUT robosuite/mujoco
 # overrides – those are already installed above.
-RUN pip install -e ".[dev,encoder]" \
- && pip install matplotlib pyarrow
+RUN python -m pip install -e ".[dev,encoder]" --break-system-packages \
+ && python -m pip install matplotlib pyarrow --break-system-packages
 
 # ── copy remaining source ─────────────────────────────────────────────────────
 COPY scripts ./scripts
