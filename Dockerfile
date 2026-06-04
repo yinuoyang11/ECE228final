@@ -2,7 +2,7 @@
 # BC Regression — LIBERO Simulation Rollout
 #
 # Base:  CUDA 12.8 + cuDNN + Ubuntu 24.04
-# Uses:  MuJoCo 2.3.7, robosuite 1.4.0, LIBERO (cloned at build time),
+# Uses:  MuJoCo 3.2.7, robosuite 1.4.0, LIBERO (cloned at build time),
 #        Python 3.12, ffmpeg for MP4 recording
 #
 # Build:
@@ -41,9 +41,9 @@ ENV PATH=/opt/venv/bin:${PATH}
 RUN python3.12 -m venv /opt/venv \
  && python -m pip install --upgrade pip setuptools wheel
 
-# ── MuJoCo 2.3.7 ─────────────────────────────────────────────────────────────
-# robosuite 1.4.0 expects mujoco >= 2.3.2
-RUN python -m pip install mujoco==2.3.7
+# ── MuJoCo ───────────────────────────────────────────────────────────────────
+# mujoco==2.3.7 has no Python 3.12 wheel and tries to build from source.
+RUN python -m pip install --only-binary=mujoco mujoco==3.2.7
 
 # ── robosuite 1.4.0 ───────────────────────────────────────────────────────────
 # LIBERO requires exactly this version
