@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +71,7 @@ def main() -> None:
 
     os.environ.setdefault("MUJOCO_GL", "egl")
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    prepare_libero_runtime_paths()
     set_seed(args.seed)
     device = torch.device(args.device)
     encoder, policy = load_model(Path(args.checkpoint), device, args.num_steps)
@@ -159,6 +161,45 @@ def main() -> None:
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(json.dumps({key: value for key, value in metrics.items() if key != "results"}, indent=2))
     print(f"saved_metrics={metrics_path}")
+
+
+def prepare_libero_runtime_paths() -> None:
+    """Point LIBERO at writable, Hub-downloaded assets before importing envs."""
+
+    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    runtime_root = Path(os.environ.get("LIBERO_RUNTIME_ROOT", hf_home / "libero_runtime"))
+    assets_dir = Path(os.environ.get("LIBERO_ASSETS_DIR", runtime_root / "assets"))
+    config_dir = Path(os.environ.get("LIBERO_RUNTIME_CONFIG_DIR", runtime_root / "config"))
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    required_asset = assets_dir / "scenes" / "libero_floor_base_style.xml"
+    if not required_asset.exists():
+        snapshot_download(repo_id="lerobot/libero-assets", repo_type="dataset", local_dir=str(assets_dir))
+
+    libero_root = _find_libero_package_root()
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"assets: {assets_dir}",
+                f"bddl_files: {libero_root / 'bddl_files'}",
+                f"benchmark_root: {libero_root}",
+                f"datasets: {libero_root / '../datasets'}",
+                f"init_states: {libero_root / 'init_files'}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    os.environ["LIBERO_CONFIG_PATH"] = str(config_dir)
+
+
+def _find_libero_package_root() -> Path:
+    spec = importlib.util.find_spec("libero.libero")
+    if spec is None or spec.submodule_search_locations is None:
+        raise RuntimeError("Could not locate the installed libero.libero package")
+    return Path(next(iter(spec.submodule_search_locations))).resolve()
 
 
 def resolve_task_specs(

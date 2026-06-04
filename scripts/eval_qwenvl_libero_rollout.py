@@ -20,6 +20,7 @@ from eval_libero_rollout import (  # noqa: E402
     load_init_states,
     make_video_frame,
     observation_to_encoder_batch,
+    prepare_libero_runtime_paths,
     reset_env,
     resolve_task_specs,
     set_seed,
@@ -56,6 +57,7 @@ def main() -> None:
 
     os.environ.setdefault("MUJOCO_GL", "egl")
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    prepare_libero_runtime_paths()
     set_seed(args.seed)
     device = torch.device(args.device)
     qwen_encoder, policy = load_model(Path(args.checkpoint), device)
