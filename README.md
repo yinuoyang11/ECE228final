@@ -61,6 +61,31 @@ PYTHONPATH=src conda run -n ece228-pi0lite \
 Frozen CLIP features are precomputed once and cached inside the run directory.
 Only the state encoder, fusion layers, and autoregressive decoder are optimized.
 
+## Task 20 Results
+
+The final report run used frozen `openai/clip-vit-base-patch32`, `3000` training
+steps, batch size `8`, and a disjoint 36/9 train/evaluation episode split.
+Metrics are computed on the 9 held-out episodes, with padded action values
+excluded.
+
+| Metric | Value |
+| --- | ---: |
+| Action MSE | 0.071554 |
+| Action L1 | 0.102701 |
+| Token cross-entropy | 2.221231 |
+| Token accuracy | 45.75% |
+| Decoder-only median latency | 995.5 ms |
+| Raw image/text end-to-end median latency | 997.7 ms |
+
+The complete metrics and generated report artifacts are available in
+[`results/autoregressive_clip_task20_3000/`](results/autoregressive_clip_task20_3000/):
+
+- [`metrics.json`](results/autoregressive_clip_task20_3000/metrics.json)
+- [`training_curves.png`](results/autoregressive_clip_task20_3000/training_curves.png)
+- [`eval_comparison.png`](results/autoregressive_clip_task20_3000/eval_comparison.png)
+- [`inference_latency.png`](results/autoregressive_clip_task20_3000/inference_latency.png)
+- [`results_table.tex`](results/autoregressive_clip_task20_3000/results_table.tex)
+
 ## Evaluate and Generate Figures
 
 ```bash
