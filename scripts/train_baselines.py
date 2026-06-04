@@ -1,33 +1,14 @@
 #!/usr/bin/env python3
-"""Train and compare all three action-generation baselines.
+"""Train the Discretized Autoregressive Action-Token Model Baseline on LIBERO Task 20.
 
 Usage:
     PYTHONPATH=src python scripts/train_baselines.py [OPTIONS]
-
-Options:
-    --epochs        Number of training epochs (default: 200)
-    --batch_size    Batch size (default: 64)
-    --horizon       Action chunk horizon (default: 16)
-    --action_dim    Action dimensionality (default: 7)
-    --cond_dim      Conditioning vector dim (default: 256)
-    --num_bins      Number of bins for autoregressive (default: 256)
-    --lr            Learning rate (default: 1e-3)
-    --hidden_dim    Hidden dimension for all models (default: 128)
-    --seed          Random seed (default: 42)
-    --save_dir      Directory to save checkpoints (default: checkpoints/)
-    --device        Device to train on (default: auto-detect)
-
-This script generates synthetic demonstration data and trains three
-policies with identical data:
-  1. Flow matching (conditional flow matching action decoder)
-  2. Behavior cloning regression (MSE baseline)
-  3. Discretized autoregressive action-token model (cross-entropy baseline)
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
+import random
 import os
 import sys
 import time
@@ -38,227 +19,128 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, random_split
 
 # Add src to path.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from lerobot_policy_pi0_lite_flow.action_tokenizer import ActionTokenizer
-from lerobot_policy_pi0_lite_flow.configuration_autoregressive import (
-    PI0LiteAutoregressiveConfig,
-)
-from lerobot_policy_pi0_lite_flow.configuration_pi0_lite_flow import PI0LiteFlowConfig
+from lerobot_policy_pi0_lite_flow.representation_encoder import RepresentationEncoder, RepresentationEncoderConfig
+from lerobot_policy_pi0_lite_flow.configuration_autoregressive import PI0LiteAutoregressiveConfig
 from lerobot_policy_pi0_lite_flow.modeling_autoregressive import AutoregressivePolicy
-from lerobot_policy_pi0_lite_flow.modeling_pi0_lite_flow import PI0LiteFlowPolicy
+from lerobot_policy_pi0_lite_flow.libero_adapter import LIBEROActionChunkDataset
 
-
-# ---------------------------------------------------------------------------
-# Behavior Cloning Regression Baseline
-# ---------------------------------------------------------------------------
-
-
-class BCRegressionNet(nn.Module):
-    """Behavior cloning regression model (MSE loss).
-
-    Given a conditioning vector, directly predicts continuous action chunks
-    using an MLP with residual blocks.
-    """
-
-    def __init__(
-        self,
-        horizon: int = 16,
-        action_dim: int = 7,
-        cond_dim: int = 256,
-        hidden_dim: int = 256,
-        num_layers: int = 4,
-    ) -> None:
-        super().__init__()
-        self.horizon = horizon
-        self.action_dim = action_dim
-
-        layers = [nn.Linear(cond_dim, hidden_dim), nn.SiLU()]
-        for _ in range(num_layers - 1):
-            layers.extend([
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.SiLU(),
-            ])
-        layers.append(nn.Linear(hidden_dim, horizon * action_dim))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, cond: Tensor) -> Tensor:
-        """Predict action chunk from conditioning vector.
-
-        Args:
-            cond: (B, cond_dim)
-
-        Returns:
-            (B, horizon, action_dim)
-        """
-        return self.net(cond).reshape(-1, self.horizon, self.action_dim)
-
-    def loss(self, actions: Tensor, cond: Tensor) -> dict[str, Tensor]:
-        pred = self.forward(cond)
-        mse = F.mse_loss(pred, actions)
-        return {"loss": mse, "mse_loss": mse.detach()}
-
-    @torch.no_grad()
-    def predict(self, cond: Tensor) -> Tensor:
-        return self.forward(cond)
-
-
-# ---------------------------------------------------------------------------
-# Synthetic data generation
-# ---------------------------------------------------------------------------
-
-
-def generate_synthetic_data(
-    num_samples: int,
-    horizon: int,
-    action_dim: int,
-    cond_dim: int,
-    seed: int = 42,
-) -> tuple[Tensor, Tensor]:
-    """Generate synthetic demonstrations with structured correlations.
-
-    Creates conditioning vectors and corresponding action chunks where
-    the actions depend on the conditioning in a learnable way:
-      - A random linear map from cond to "target" action
-      - Smooth temporal structure (actions change slowly over horizon)
-      - Some noise to make it realistic
-    """
-    torch.manual_seed(seed)
-
-    # Random projection from cond_dim to action_dim.
-    W = torch.randn(cond_dim, action_dim) * 0.1
-    b = torch.randn(action_dim) * 0.5
-
-    # Generate conditioning vectors.
-    cond = torch.randn(num_samples, cond_dim)
-
-    # Generate "target" actions from cond.
-    base_action = cond @ W + b  # (N, action_dim)
-
-    # Create smooth action chunks with temporal structure.
-    t = torch.linspace(0, 1, horizon).unsqueeze(0).unsqueeze(-1)  # (1, H, 1)
-    freq = torch.randn(num_samples, 1, action_dim) * 2  # Random frequency per sample
-    phase = torch.randn(num_samples, 1, action_dim) * math.pi
-
-    actions = (
-        base_action.unsqueeze(1)
-        + 0.3 * torch.sin(2 * math.pi * freq * t + phase)
-        + 0.05 * torch.randn(num_samples, horizon, action_dim)
-    )
-
-    return cond, actions
-
-
-# ---------------------------------------------------------------------------
-# Training loop
-# ---------------------------------------------------------------------------
-
+def collate_libero(batch: list[dict]) -> dict:
+    """Custom collate function for LIBEROActionChunkDataset outputs."""
+    return {
+        'images': torch.stack([b['images'] for b in batch]),       # (B, 2, 3, 224, 224)
+        'state': torch.stack([b['state'] for b in batch]),         # (B, 8)
+        'instruction': [b['instruction'] for b in batch],          # list of str
+        'action': torch.stack([b['action'] for b in batch]),       # (B, H, 7)
+    }
 
 def train_one_epoch(
     model: nn.Module,
-    method: str,
+    encoder: nn.Module,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> dict[str, float]:
-    """Train for one epoch.  Returns average metrics."""
     model.train()
+    encoder.train()
     total_loss = 0.0
-    total_extra = {}
+    total_acc = 0.0
     num_batches = 0
 
-    for cond_batch, action_batch in dataloader:
-        cond_batch = cond_batch.to(device)
-        action_batch = action_batch.to(device)
+    for batch in dataloader:
+        images = batch['images'].to(device)
+        state = batch['state'].to(device)
+        action_batch = batch['action'].to(device)
+        instructions = batch['instruction']
+        
         optimizer.zero_grad()
 
-        if method == "flow":
-            batch = {"action": action_batch, "observation.cond": cond_batch}
-            output = model.forward(batch)
-        elif method == "autoregressive":
-            batch = {"action": action_batch, "observation.cond": cond_batch}
-            output = model.forward(batch)
-        elif method == "regression":
-            output = model.loss(action_batch, cond_batch)
-        else:
-            raise ValueError(f"Unknown method: {method}")
+        encoder_input = {
+            "images": images,
+            "state": state,
+            "instruction": instructions,
+        }
+        cond_batch = encoder(encoder_input)
+
+        fwd_batch = {"action": action_batch, "observation.cond": cond_batch}
+        output = model.forward(fwd_batch)
 
         output["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(encoder.parameters(), 1.0)
         optimizer.step()
 
         total_loss += output["loss"].item()
-        for k, v in output.items():
-            if k != "loss" and isinstance(v, Tensor):
-                total_extra[k] = total_extra.get(k, 0.0) + v.item()
+        if "accuracy" in output:
+            total_acc += output["accuracy"].item()
         num_batches += 1
 
-    avg = {"loss": total_loss / num_batches}
-    for k, v in total_extra.items():
-        avg[k] = v / num_batches
-    return avg
+        if num_batches % 20 == 0 or num_batches == 1 or num_batches == len(dataloader):
+            print(f"  Batch {num_batches:3d}/{len(dataloader):3d} | Loss: {output['loss'].item():.4f}", flush=True)
 
+    return {
+        "loss": total_loss / max(1, num_batches),
+        "accuracy": total_acc / max(1, num_batches)
+    }
 
 @torch.no_grad()
 def evaluate_model(
     model: nn.Module,
-    method: str,
-    cond: Tensor,
-    actions: Tensor,
+    encoder: nn.Module,
+    eval_loader: DataLoader,
     device: torch.device,
 ) -> dict[str, float]:
-    """Evaluate action prediction quality."""
     model.eval()
-    cond = cond.to(device)
-    actions = actions.to(device)
+    encoder.eval()
+    
+    total_mse = 0.0
+    total_l1 = 0.0
+    total_samples = 0
+    total_inf_time = 0.0
+    
+    for batch in eval_loader:
+        images = batch['images'].to(device)
+        state = batch['state'].to(device)
+        actions = batch['action'].to(device)
+        instructions = batch['instruction']
+        batch_size = state.size(0)
+        
+        encoder_input = {
+            "images": images,
+            "state": state,
+            "instruction": instructions,
+        }
+        cond = encoder(encoder_input)
+        batch_dict = {"observation.cond": cond}
+        
+        t0 = time.time()
+        pred = model.predict_action_chunk(batch_dict)
+        inf_time = time.time() - t0
+        total_inf_time += inf_time
+        
+        total_mse += F.mse_loss(pred, actions, reduction='sum').item()
+        total_l1 += F.l1_loss(pred, actions, reduction='sum').item()
+        total_samples += batch_size
 
-    batch = {"observation.cond": cond}
-
-    # Predict action chunks.
-    t0 = time.time()
-    if method == "flow":
-        pred = model.predict_action_chunk(batch)
-    elif method == "autoregressive":
-        pred = model.predict_action_chunk(batch)
-    elif method == "regression":
-        pred = model.predict(cond)
-    else:
-        raise ValueError(f"Unknown method: {method}")
-    inference_time = (time.time() - t0) / max(cond.shape[0], 1)
-
-    # Metrics.
-    mse = F.mse_loss(pred, actions).item()
-    l1 = F.l1_loss(pred, actions).item()
-
-    # Action smoothness: average jerk (3rd derivative approximation).
-    if pred.shape[1] >= 3:
-        jerk = torch.diff(pred, n=2, dim=1).abs().mean().item()
-    else:
-        jerk = 0.0
-
+    action_elements = eval_loader.dataset[0]['action'].numel()
+    
     return {
-        "mse": mse,
-        "l1": l1,
-        "jerk": jerk,
-        "inference_time_per_sample": inference_time,
+        "mse": total_mse / max(1, total_samples * action_elements),
+        "l1": total_l1 / max(1, total_samples * action_elements),
+        "inference_time_per_sample": total_inf_time / max(1, total_samples),
     }
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Train all three baselines")
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser = argparse.ArgumentParser(description="Train Autoregressive Baseline on HuggingFaceVLA/libero task 20")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--horizon", type=int, default=16)
     parser.add_argument("--action_dim", type=int, default=7)
+    parser.add_argument("--state_dim", type=int, default=8)
     parser.add_argument("--cond_dim", type=int, default=256)
     parser.add_argument("--num_bins", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -266,11 +148,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="checkpoints")
     parser.add_argument("--device", type=str, default="")
-    parser.add_argument("--num_train", type=int, default=2000)
-    parser.add_argument("--num_eval", type=int, default=500)
+    parser.add_argument("--eval_only", action="store_true")
     args = parser.parse_args()
 
-    # Device.
     if args.device:
         device = torch.device(args.device)
     elif torch.cuda.is_available():
@@ -281,27 +161,71 @@ def main():
         device = torch.device("cpu")
     print(f"Using device: {device}")
 
-    torch.manual_seed(args.seed)
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate data.
-    print("Generating synthetic demonstration data...")
-    train_cond, train_actions = generate_synthetic_data(
-        args.num_train, args.horizon, args.action_dim, args.cond_dim, seed=args.seed
+    # --------------- Load LIBERO dataset via teammate's adapter ----------------
+    print("\nLoading HuggingFaceVLA/libero dataset using teammate's LIBEROActionChunkDataset...")
+    print("Using Task 20 specifically as requested!")
+    
+    import glob
+    import os
+    from datasets import Dataset, concatenate_datasets
+    
+    arrow_pattern = os.path.expanduser("~/.cache/huggingface/datasets/HuggingFaceVLA___libero/default/0.0.0/86958911c0f959db2bbbdb107eb3e17c5f9c798e/*.arrow")
+    arrow_files = sorted(glob.glob(arrow_pattern))
+    
+    if arrow_files:
+        print(f"Found {len(arrow_files)} compiled Arrow files in local cache!")
+        print("Loading dataset directly from local Arrow files to bypass download...")
+        shards = [Dataset.from_file(f) for f in arrow_files]
+        hf_ds = concatenate_datasets(shards)
+    else:
+        print("Local Arrow cache not found. Downloading/loading dataset from HF Hub...")
+        from datasets import load_dataset
+        hf_ds = load_dataset("HuggingFaceVLA/libero", split="train")
+    
+    full_dataset = LIBEROActionChunkDataset(
+        base_dataset=hf_ds,
+        horizon=args.horizon,
+        task_indices=[20],
     )
-    eval_cond, eval_actions = generate_synthetic_data(
-        args.num_eval, args.horizon, args.action_dim, args.cond_dim, seed=args.seed + 1
+    
+    # Train / eval split
+    dataset_size = len(full_dataset)
+    train_size = int(0.8 * dataset_size)
+    eval_size = dataset_size - train_size
+    train_dataset, eval_dataset = random_split(full_dataset, [train_size, eval_size])
+    
+    print(f"Total Task 20 frames: {dataset_size}")
+    print(f"Train samples: {train_size} | Eval samples: {eval_size}")
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=0, collate_fn=collate_libero,
+    )
+    eval_loader = DataLoader(
+        eval_dataset, batch_size=8, shuffle=False,
+        num_workers=0, collate_fn=collate_libero,
     )
 
-    train_dataset = TensorDataset(train_cond, train_actions)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-
-    # Dataset stats for tokenizer bounds.
-    action_min = train_actions.reshape(-1, args.action_dim).min(dim=0).values
-    action_max = train_actions.reshape(-1, args.action_dim).max(dim=0).values
-    action_mean = train_actions.reshape(-1, args.action_dim).mean(dim=0)
-    action_std = train_actions.reshape(-1, args.action_dim).std(dim=0)
+    # Note: To avoid iterating over the entire image dataset which is slow, we use a fixed approximation
+    # for dataset statistics based on typical LIBERO ranges, or we can just fetch a few batches to estimate it.
+    print("Estimating action statistics from the first few batches...")
+    all_actions = []
+    for i, batch in enumerate(train_loader):
+        all_actions.append(batch["action"].reshape(-1, args.action_dim))
+        if i >= 10:  # use 10 batches (320 samples) to estimate stats
+            break
+            
+    all_actions = torch.cat(all_actions, dim=0)
+    action_min = all_actions.min(dim=0).values
+    action_max = all_actions.max(dim=0).values
+    action_mean = all_actions.mean(dim=0)
+    action_std = all_actions.std(dim=0)
+    
+    action_max = torch.where(action_max == action_min, action_max + 1e-6, action_max)
+    action_std = action_std.clamp_min(1e-6)
 
     dataset_stats = {
         "action": {
@@ -312,21 +236,18 @@ def main():
         }
     }
 
-    # --------------- Build models ----------------
+    # --------------- Build Autoregressive Model ----------------
+    print("\nBuilding Autoregressive Model & Representation Encoder...")
+    enc_cfg = RepresentationEncoderConfig(state_dim=args.state_dim, cond_dim=args.cond_dim)
+    encoder = RepresentationEncoder(enc_cfg).to(device)
 
-    # 1. Flow matching.
-    flow_config = PI0LiteFlowConfig(
-        horizon=args.horizon,
-        action_dim=args.action_dim,
-        cond_dim=args.cond_dim,
-        hidden_dim=args.hidden_dim,
-        num_layers=4,
-        inference_steps=8,
-    )
-    flow_stats = {"action": {"mean": action_mean, "std": action_std}}
-    flow_policy = PI0LiteFlowPolicy(flow_config, dataset_stats=flow_stats).to(device)
+    dummy_batch = {
+        "images": torch.zeros(1, 2, 3, 224, 224, device=device),
+        "state": torch.zeros(1, args.state_dim, device=device),
+        "instruction": ["dummy task description"],
+    }
+    encoder(dummy_batch)
 
-    # 2. Autoregressive.
     ar_config = PI0LiteAutoregressiveConfig(
         horizon=args.horizon,
         action_dim=args.action_dim,
@@ -338,97 +259,65 @@ def main():
         dim_feedforward=args.hidden_dim * 4,
         dropout=0.1,
     )
-    ar_policy = AutoregressivePolicy(ar_config, dataset_stats=dataset_stats).to(device)
+    model = AutoregressivePolicy(ar_config, dataset_stats=dataset_stats).to(device)
 
-    # 3. BC Regression.
-    bc_model = BCRegressionNet(
-        horizon=args.horizon,
-        action_dim=args.action_dim,
-        cond_dim=args.cond_dim,
-        hidden_dim=args.hidden_dim,
-        num_layers=4,
-    ).to(device)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(encoder.parameters()), 
+        lr=args.lr, weight_decay=1e-4
+    )
 
-    models = {
-        "flow": (flow_policy, "flow"),
-        "autoregressive": (ar_policy, "autoregressive"),
-        "regression": (bc_model, "regression"),
-    }
-
-    optimizers = {
-        name: torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-        for name, (model, _) in models.items()
-    }
-
-    # Print model sizes.
-    print("\n" + "=" * 60)
-    print("Model sizes:")
-    for name, (model, _) in models.items():
-        n_params = sum(p.numel() for p in model.parameters())
-        print(f"  {name}: {n_params:,} parameters")
-    print("=" * 60 + "\n")
+    n_params = sum(p.numel() for p in model.parameters())
+    enc_params = sum(p.numel() for p in encoder.parameters())
+    print(f"Total params: {n_params + enc_params:,} (Decoder: {n_params:,}, Encoder: {enc_params:,})")
 
     # --------------- Training ----------------
-
-    history = {name: [] for name in models}
-
-    print("Training...")
-    for epoch in range(1, args.epochs + 1):
-        for name, (model, method) in models.items():
-            metrics = train_one_epoch(model, method, train_loader, optimizers[name], device)
-            history[name].append(metrics)
-
-        if epoch % 20 == 0 or epoch == 1:
-            losses = {n: history[n][-1]["loss"] for n in models}
-            loss_str = " | ".join(f"{n}: {v:.4f}" for n, v in losses.items())
-            print(f"Epoch {epoch:4d} | {loss_str}")
-
-    # --------------- Evaluation ----------------
+    history = []
+    
+    if not args.eval_only:
+        print(f"Training for {args.epochs} epochs...")
+        for epoch in range(1, args.epochs + 1):
+            metrics = train_one_epoch(
+                model=model,
+                encoder=encoder,
+                dataloader=train_loader,
+                optimizer=optimizer,
+                device=device
+            )
+            history.append(metrics)
+    
+            if epoch % 10 == 0 or epoch == 1:
+                print(f"Epoch {epoch:4d} | Loss: {metrics['loss']:.4f} | Acc: {metrics['accuracy']:.4f}")
+    
+        torch.save(model.state_dict(), save_dir / "autoregressive_model.pt")
+        torch.save(encoder.state_dict(), save_dir / "autoregressive_encoder.pt")
+    else:
+        print("Loading checkpoints for evaluation...")
+        model.load_state_dict(torch.load(save_dir / "autoregressive_model.pt", map_location=device))
+        encoder.load_state_dict(torch.load(save_dir / "autoregressive_encoder.pt", map_location=device))
 
     print("\n" + "=" * 60)
-    print("Evaluation Results:")
+    print("Evaluation Results on HuggingFaceVLA/libero (Task 20):")
     print("=" * 60)
 
-    eval_results = {}
-    for name, (model, method) in models.items():
-        metrics = evaluate_model(model, method, eval_cond, eval_actions, device)
-        eval_results[name] = metrics
-        print(f"\n{name}:")
-        for k, v in metrics.items():
-            print(f"  {k}: {v:.6f}")
+    metrics = evaluate_model(
+        model=model,
+        encoder=encoder,
+        eval_loader=eval_loader,
+        device=device
+    )
+    print(f"MSE: {metrics['mse']:.6f}")
+    print(f"L1: {metrics['l1']:.6f}")
+    print(f"Inference Time: {metrics['inference_time_per_sample']:.4f}s")
 
-    # --------------- Save ----------------
-
-    # Save checkpoints.
-    for name, (model, _) in models.items():
-        torch.save(model.state_dict(), save_dir / f"{name}_model.pt")
-
-    # Save training history and eval results.
     results = {
         "args": vars(args),
-        "eval_results": eval_results,
-        "training_history": {
-            name: [{"epoch": i + 1, **m} for i, m in enumerate(hist)]
-            for name, hist in history.items()
-        },
+        "eval_results": {"autoregressive": metrics},
+        "training_history": {"autoregressive": [{"epoch": i + 1, **m} for i, m in enumerate(history)]},
     }
     with open(save_dir / "results.json", "w") as f:
         json.dump(results, f, indent=2, default=str)
 
     print(f"\nCheckpoints and results saved to {save_dir}/")
-
-    # --------------- Summary Table ----------------
-
-    print("\n" + "=" * 60)
-    print(f"{'Method':<20} {'MSE':>10} {'L1':>10} {'Jerk':>10} {'Inf Time':>12}")
-    print("-" * 60)
-    for name, metrics in eval_results.items():
-        print(
-            f"{name:<20} {metrics['mse']:>10.6f} {metrics['l1']:>10.6f} "
-            f"{metrics['jerk']:>10.6f} {metrics['inference_time_per_sample']:>10.4f}s"
-        )
-    print("=" * 60)
-
 
 if __name__ == "__main__":
     main()

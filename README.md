@@ -1,55 +1,31 @@
-# π0-Lite: Flow Matching vs Autoregressive vs Regression Action Decoders
+# Discretized Autoregressive Action-Token Model Baseline (ECE 228 Final)
 
-This package provides a LeRobot-style custom policy plugin for comparing three action-generation approaches for language-conditioned robot manipulation:
+This package provides a custom policy baseline for language-conditioned robot manipulation, evaluated on the **LIBERO** benchmark (Task 20). It is designed to plug into the overall project pipeline built by the team.
 
-1. **Conditional Flow Matching (CFM)** — the main π0-Lite method
-2. **Discretized Autoregressive Action Tokens** — OpenVLA-style baseline
-3. **Behavior Cloning Regression (MSE)** — simple MLP baseline
-
-All three methods consume a precomputed conditioning vector `batch["observation.cond"]` and predict continuous action chunks `(B, horizon, action_dim)`.
+This specific baseline implements a **Discretized Autoregressive Action Token** policy (similar to OpenVLA).
 
 ## Architecture Overview
 
-### Flow Matching (Main Method)
-- Trains a velocity field network with the flow matching objective
-- At inference, integrates the learned velocity field from Gaussian noise using Euler steps
-- Supports both MLP-FiLM and Temporal Transformer architectures
+### Upstream: RepresentationEncoder (Teammate)
+- Encodes **dual-view RGB images** (third-person + wrist camera) via CLIP vision encoder
+- Encodes **language instructions** via CLIP text encoder
+- Encodes **robot proprioceptive state** (8-dim) via MLP
+- Fuses all modalities into a 256-dim conditioning vector via a learned MLP fusion layer
 
-### Discretized Autoregressive Action Tokens (Baseline)
+### Downstream: Autoregressive Decoder (This Baseline)
 - Each action dimension is binned into 256 discrete tokens (uniform bins)
 - A causal Transformer autoregressively predicts the token sequence
 - Trained with cross-entropy loss (next-token prediction)
 - At inference, tokens are sampled one at a time and decoded back to continuous values
-- Follows the **OpenVLA** paradigm (Kim et al., 2024)
 
-### BC Regression (Baseline)
-- Directly predicts continuous action chunks with MSE loss
-- Simple MLP with residual connections
+## Dataset
 
-## Input Format
-
-All policies expect a precomputed fused vision-language conditioning vector:
-
-```python
-batch["observation.cond"]  # torch.Tensor, shape: (B, cond_dim)
-```
-
-Default `cond_dim = 256`. During training, the batch must also include:
-
-```python
-batch = {
-    "observation.cond": cond.float(),       # (B, 256) by default
-    "action": actions.float(),              # (B, horizon, action_dim)
-    "action_is_pad": pad_mask.bool(),       # optional, (B, horizon)
-}
-```
-
-At inference, only the condition vector is required:
-
-```python
-batch = {"observation.cond": cond.float()}
-action = policy.select_action(batch)   # (B, action_dim)
-```
+We natively use the team's `LIBEROActionChunkDataset` adapter, which pulls from the complete LIBERO benchmark:
+- **Repo ID**: `HuggingFaceVLA/libero`
+- **Task**: Task 20 specifically
+- **Observations**: Dual-view RGB images (`image` and `image2`) + 8-dim proprioceptive state
+- **Actions**: 7-dim (6 DOF arm + gripper), chunked with horizon=16
+- **Split**: 80% train / 20% test, seed=42
 
 ## Quick Start
 
@@ -58,30 +34,25 @@ action = policy.select_action(batch)   # (B, action_dim)
 ```bash
 conda create -n ece228-pi0lite python=3.12
 conda activate ece228-pi0lite
-pip install torch einops pytest matplotlib
+pip install torch torchvision einops pytest matplotlib transformers datasets
 pip install -e .
 ```
 
-### Run Tests
+### Train the Autoregressive Baseline
 
 ```bash
-PYTHONPATH=src pytest tests/ -v
+PYTHONPATH=src python scripts/train_baselines.py --epochs 100 --batch_size 32
 ```
 
-### Train All Baselines
-
-```bash
-PYTHONPATH=src python scripts/train_baselines.py --epochs 200 --hidden_dim 128
-```
-
-This trains all three methods on synthetic demonstration data and saves:
+This seamlessly downloads the **real LIBERO Task 20 image dataset**, trains the Autoregressive model jointly with the RepresentationEncoder, and saves:
 - Model checkpoints → `checkpoints/`
 - Training history + eval results → `checkpoints/results.json`
 
 ### Evaluate and Generate Plots
 
 ```bash
-pip install matplotlib
+PYTHONPATH=src python scripts/evaluate_baselines.py
+```
 PYTHONPATH=src python scripts/evaluate_baselines.py
 ```
 
@@ -100,15 +71,19 @@ ECE228final/
 │   ├── action_tokenizer.py              # Discretizes actions into tokens
 │   ├── configuration_autoregressive.py   # Autoregressive baseline config
 │   ├── configuration_pi0_lite_flow.py    # Flow matching config
+│   ├── libero_adapter.py                # LIBERO dataset adapter (teammate)
 │   ├── modeling_autoregressive.py        # Autoregressive decoder + policy
 │   ├── modeling_pi0_lite_flow.py         # Flow matching decoder + policy
-│   └── processor_pi0_lite_flow.py        # Data processors
+│   ├── processor_pi0_lite_flow.py        # Data processors
+│   └── representation_encoder.py         # CLIP + state encoder (teammate)
 ├── scripts/
-│   ├── train_baselines.py               # Train all three methods
+│   ├── train_baselines.py               # Train all three methods on LIBERO
 │   └── evaluate_baselines.py            # Generate comparison plots
 ├── tests/
 │   ├── test_autoregressive.py           # 15 tests for autoregressive baseline
 │   └── test_flow_decoder.py             # 6 tests for flow matching
+├── checkpoints/                         # Trained model weights
+├── results/                             # Generated plots and tables
 ├── pyproject.toml
 ├── environment.yml
 └── README.md
@@ -170,3 +145,4 @@ action = policy.select_action(batch)  # with chunk caching
 - **π0**: Black et al., "π0: A Vision-Language-Action Flow Model for General Robot Control", arXiv:2410.24164, 2024.
 - **OpenVLA**: Kim et al., "OpenVLA: An Open-Source Vision-Language-Action Model", arXiv:2406.09246, 2024.
 - **Diffusion Policy**: Chi et al., "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion", RSS 2023.
+- **LIBERO**: Liu et al., "LIBERO: Benchmarking Knowledge Transfer for Lifelong Robot Learning", NeurIPS 2023.
