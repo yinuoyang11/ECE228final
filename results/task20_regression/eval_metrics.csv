@@ -1,2 +1,0 @@
-checkpoint,repo_id,task_indices,start_index,num_samples,mse,l1,position_mse,rotation_mse,gripper_mse,gripper_sign_accuracy,smoothness,latency_sec_per_sample
-runs/bc_regression/task20_regression/checkpoint_final.pt,HuggingFaceVLA/libero,[20],0,1000,0.00809385805389722,0.04173704769941172,0.004966607993909321,0.00017093291150679585,0.04124438474765711,0.991754617414248,0.02232088266035258,0.005903843066292325

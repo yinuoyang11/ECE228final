@@ -104,9 +104,11 @@ python scripts\eval_regression_custom.py `
 
 ---
 
-## Rollout Videos
+## Rollout Videos (Offline Visualization)
 
-Generate 10 rollout videos covering different scenarios across tasks 20, 21, 22:
+Generate 10 offline visualization videos covering different scenarios across tasks 20, 21, 22.
+These are **not** simulation rollouts — the robot frames come from the expert demonstrations
+in the dataset, with the model's predicted actions overlaid as a bar chart.
 
 ```powershell
 python scripts\batch_rollout.py `
@@ -119,6 +121,39 @@ python scripts\batch_rollout.py `
 
 Videos are saved as `results/rollouts/Task20-ep0.mp4`, `Task21-ep11.mp4`, etc.
 Each video shows agent-view | wrist-view + a per-DOF action bar (predicted vs expert).
+
+---
+
+## Simulation Rollout — Success Rate (Linux Server)
+
+To get a real **task success rate**, run the simulation rollout script on a Linux server
+with MuJoCo + LIBERO + ffmpeg installed:
+
+```bash
+# Install requirements (server)
+pip install -e /path/to/LIBERO   # LIBERO from source
+pip install robosuite==1.4.0
+
+# Run 10 episodes per task, tasks 20+21+22
+python scripts/sim_rollout_regression.py \
+  results/task202122_regression/checkpoint_final.pt \
+  --dataset-task-indices 20 21 22 \
+  --episodes-per-task 10 \
+  --suite libero_object \
+  --video-dir results/sim_rollout \
+  --device cuda
+```
+
+Output `results/sim_rollout/rollout_metrics.json` will contain:
+- `success_rate` — fraction of episodes where the task was completed
+- `successes` / `episodes` — raw counts
+- Per-episode `success`, `steps`, `video` path
+
+Server requirements:
+- Linux (Ubuntu 20.04+)
+- NVIDIA GPU + CUDA
+- `MUJOCO_GL=egl` (set automatically by the script)
+- `ffmpeg` on PATH
 
 ---
 
