@@ -175,7 +175,12 @@ class AutoregressiveActionDecoder(nn.Module):
 
         return logits
 
-    def loss(self, token_ids: Tensor, cond: Tensor) -> dict[str, Tensor]:
+    def loss(
+        self,
+        token_ids: Tensor,
+        cond: Tensor,
+        token_is_pad: Tensor | None = None,
+    ) -> dict[str, Tensor]:
         """Compute teacher-forced cross-entropy loss.
 
         The model sees ``[cond, tok_0, ..., tok_{n-2}]`` and predicts
@@ -184,6 +189,8 @@ class AutoregressiveActionDecoder(nn.Module):
         Args:
             token_ids: ``(B, seq_len)`` target token IDs.
             cond: ``(B, cond_dim)`` conditioning vector.
+            token_is_pad: Optional ``(B, seq_len)`` mask. Padded targets are
+                excluded from loss and accuracy.
 
         Returns:
             Dict with keys ``"loss"`` (scalar), ``"ce_loss"`` (detached),
@@ -198,16 +205,28 @@ class AutoregressiveActionDecoder(nn.Module):
         pred_logits = logits[:, :-1]  # (B, seq_len, num_bins)
         targets = token_ids  # (B, seq_len)
 
-        # Flatten for cross-entropy.
-        ce_loss = F.cross_entropy(
+        per_token_loss = F.cross_entropy(
             pred_logits.reshape(-1, self.num_bins),
             targets.reshape(-1),
-        )
+            reduction="none",
+        ).reshape_as(targets)
+
+        if token_is_pad is None:
+            valid = torch.ones_like(targets, dtype=torch.bool)
+        else:
+            if token_is_pad.shape != targets.shape:
+                raise ValueError(
+                    f"token_is_pad must have shape {tuple(targets.shape)}, got {tuple(token_is_pad.shape)}"
+                )
+            valid = ~token_is_pad.bool()
+        valid_count = valid.sum().clamp_min(1)
+        ce_loss = (per_token_loss * valid).sum() / valid_count
 
         # Token-level accuracy.
         with torch.no_grad():
             predicted_tokens = pred_logits.argmax(dim=-1)  # (B, seq_len)
-            accuracy = (predicted_tokens == targets).float().mean()
+            correct = (predicted_tokens == targets) & valid
+            accuracy = correct.sum().float() / valid_count
 
         return {
             "loss": ce_loss,
@@ -394,8 +413,21 @@ class AutoregressivePolicy(PreTrainedPolicy):
 
         # Tokenize actions.
         token_ids = self.tokenizer.encode(actions)  # (B, H * D)
+        token_is_pad = None
+        if "action_is_pad" in batch:
+            action_is_pad = batch["action_is_pad"]
+            if action_is_pad.shape != actions.shape[:2]:
+                raise ValueError(
+                    f"action_is_pad must have shape {tuple(actions.shape[:2])}, got {tuple(action_is_pad.shape)}"
+                )
+            token_is_pad = (
+                action_is_pad.bool()
+                .unsqueeze(-1)
+                .expand(-1, -1, actions.shape[-1])
+                .reshape(actions.shape[0], -1)
+            )
 
-        return self.decoder.loss(token_ids, cond)
+        return self.decoder.loss(token_ids, cond, token_is_pad=token_is_pad)
 
     @torch.no_grad()
     def predict_action_chunk(

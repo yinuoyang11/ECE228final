@@ -75,7 +75,7 @@ The evaluation command writes:
 
 - `metrics.json`
 - `training_curves.png`
-- `eval_metrics.png`
+- `eval_comparison.png`
 - `inference_latency.png`
 - `results_table.tex`
 
@@ -90,6 +90,7 @@ for real experiments. Flow matching training remains available through
 ```text
 src/lerobot_policy_pi0_lite_flow/
   action_tokenizer.py
+  autoregressive_experiment.py
   configuration_autoregressive.py
   libero_adapter.py
   modeling_autoregressive.py

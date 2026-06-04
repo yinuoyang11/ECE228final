@@ -133,6 +133,12 @@ class CLIPImageEncoder(nn.Module):
         features = _clip_output_to_tensor(features, projection=getattr(self.model, "visual_projection", None))
         return features.reshape(batch_size, num_views, -1)
 
+    def train(self, mode: bool = True) -> CLIPImageEncoder:
+        super().train(mode)
+        if not any(param.requires_grad for param in self.model.parameters()):
+            self.model.eval()
+        return self
+
 
 class CLIPTextEncoder(nn.Module):
     """CLIP text encoder backed by Hugging Face transformers."""
@@ -170,6 +176,12 @@ class CLIPTextEncoder(nn.Module):
         with torch.set_grad_enabled(grad_enabled):
             features = self.model.get_text_features(**encoded)
         return _clip_output_to_tensor(features, projection=getattr(self.model, "text_projection", None))
+
+    def train(self, mode: bool = True) -> CLIPTextEncoder:
+        super().train(mode)
+        if not any(param.requires_grad for param in self.model.parameters()):
+            self.model.eval()
+        return self
 
 
 class StateEncoder(nn.Module):
@@ -215,8 +227,16 @@ class RepresentationEncoder(nn.Module):
         )
 
     def forward(self, batch: Mapping[str, Any]) -> Tensor:
+        features = self.extract_features(batch)
+        return self.forward_from_features(
+            image_features=features["image_features"],
+            state=_require_tensor(batch, "state"),
+            text_features=features.get("text_features"),
+        )
+
+    def extract_features(self, batch: Mapping[str, Any]) -> dict[str, Tensor]:
+        """Extract image and text backbone features for optional frozen caching."""
         images = _require_tensor(batch, "images")
-        state = _require_tensor(batch, "state")
 
         if images.ndim == 4:
             images = images.unsqueeze(1)
@@ -226,15 +246,41 @@ class RepresentationEncoder(nn.Module):
             raise ValueError(f"Configured num_views={self.config.num_views}, got {images.shape[1]}")
 
         image_features = self.image_encoder(images)
-        image_emb = self.image_projection(image_features.flatten(start_dim=1))
-        state_emb = self.state_encoder(state)
-
-        pieces = [image_emb, state_emb]
+        features = {"image_features": image_features}
         if self.config.use_language:
             instructions = batch.get("instruction")
             if not isinstance(instructions, Sequence) or isinstance(instructions, (str, bytes)):
                 raise TypeError("batch['instruction'] must be a sequence of strings")
-            pieces.append(self.text_encoder(instructions, device=images.device))
+            features["text_features"] = self.text_encoder(instructions, device=images.device)
+        return features
+
+    def forward_from_features(
+        self,
+        image_features: Tensor,
+        state: Tensor,
+        text_features: Tensor | None = None,
+    ) -> Tensor:
+        """Fuse cached backbone features with the trainable state encoder."""
+        if image_features.ndim != 3:
+            raise ValueError(
+                f"Expected image_features [B, V, D], got {tuple(image_features.shape)}"
+            )
+        if image_features.shape[1] != self.config.num_views:
+            raise ValueError(f"Configured num_views={self.config.num_views}, got {image_features.shape[1]}")
+        if image_features.shape[2] != self.config.image_dim:
+            raise ValueError(f"Configured image_dim={self.config.image_dim}, got {image_features.shape[2]}")
+
+        image_emb = self.image_projection(image_features.flatten(start_dim=1))
+        state_emb = self.state_encoder(state)
+        pieces = [image_emb, state_emb]
+        if self.config.use_language:
+            if text_features is None:
+                raise ValueError("text_features are required when use_language=True")
+            if text_features.ndim != 2 or text_features.shape[-1] != self.config.text_dim:
+                raise ValueError(
+                    f"Expected text_features [B, {self.config.text_dim}], got {tuple(text_features.shape)}"
+                )
+            pieces.append(text_features)
 
         return self.fusion(torch.cat(pieces, dim=-1))
 

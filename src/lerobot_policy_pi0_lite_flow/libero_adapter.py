@@ -56,6 +56,7 @@ class LIBEROActionChunkDataset(Dataset):
         state_key: str = "observation.state",
         action_key: str = "action",
         instruction_keys: Sequence[str] = DEFAULT_INSTRUCTION_KEYS,
+        task_descriptions: Mapping[int, str] | None = None,
     ) -> None:
         if horizon <= 0:
             raise ValueError("horizon must be positive")
@@ -65,6 +66,7 @@ class LIBEROActionChunkDataset(Dataset):
         self.state_key = state_key
         self.action_key = action_key
         self.instruction_keys = tuple(instruction_keys)
+        self.task_descriptions = dict(task_descriptions or {})
         self.dataset = base_dataset if base_dataset is not None else self._load_lerobot_dataset(repo_id)
         self.episode_ranges = _episode_ranges(self.dataset)
         self.index_to_episode_end = _index_to_episode_end(self.episode_ranges)
@@ -86,10 +88,14 @@ class LIBEROActionChunkDataset(Dataset):
             state_key=self.state_key,
             instruction_keys=self.instruction_keys,
         )
+        instruction = batch["instruction"][0]
+        if not instruction and self.task_descriptions:
+            task_index = _read_task_index(sample)
+            instruction = self.task_descriptions.get(task_index, "")
         return {
             "images": batch["images"].squeeze(0),
             "state": batch["state"].squeeze(0),
-            "instruction": batch["instruction"][0],
+            "instruction": instruction,
             self.action_key: action_chunk,
             "action_is_pad": action_is_pad,
         }
@@ -147,6 +153,12 @@ def _read_instruction(sample: Mapping[str, Any], keys: Sequence[str]) -> str:
         if value is not None:
             return str(value)
     return ""
+
+
+def _read_task_index(sample: Mapping[str, Any]) -> int:
+    if "task_index" not in sample:
+        raise KeyError("Sample has no task_index for task description lookup")
+    return int(_to_tensor(sample["task_index"]).item())
 
 
 def _to_tensor(value: Any) -> Tensor:

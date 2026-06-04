@@ -17,6 +17,7 @@ dist/
 *.log
 runs/
 checkpoints/
+checkpoints_smoke/
 rollout_videos/
 .DS_Store
 Thumbs.db
