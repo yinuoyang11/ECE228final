@@ -1,0 +1,33 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets / local config
+.env
+.env.*
+
+# Large data / outputs – mount these as volumes instead
+results/
+*.pt
+*.mp4
+*.png
+*.svg
+
+# Git
+.git/
+.gitignore
+
+# Docs / misc
+*.md
+*.log
+Thumbs.db
+.DS_Store
