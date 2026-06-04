@@ -50,12 +50,22 @@ RUN python -m pip install --only-binary=mujoco mujoco==3.2.7
 # LIBERO requires exactly this version
 RUN python -m pip install robosuite==1.4.0
 
+# LIBERO's setup.py does not declare its runtime dependencies.
+RUN python -m pip install \
+    "pyyaml>=6.0" \
+    "easydict>=1.9" \
+    "cloudpickle>=2.1" \
+    "gym==0.25.2" \
+    "bddl==1.0.1" \
+    "termcolor>=2.0" \
+    "imageio>=2.31" \
+    "tqdm>=4.64"
+
 # ── LIBERO (from source) ──────────────────────────────────────────────────────
 # Clone and install; skip bddl/init_states download at build time –
 # they are bundled with the package via the libero.libero module.
 RUN git clone --depth 1 https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO \
- && python -m pip install -e /opt/LIBERO \
- && python -c "import libero; from libero.libero import benchmark; print('libero_paths=' + str(list(libero.__path__))); print(sorted(benchmark.get_benchmark_dict()))"
+ && python -m pip install -e /opt/LIBERO
 
 # ── project Python deps ───────────────────────────────────────────────────────
 WORKDIR /workspace
@@ -65,7 +75,8 @@ COPY src ./src
 # Install project with all extras (encoder + dev) but WITHOUT robosuite/mujoco
 # overrides – those are already installed above.
 RUN python -m pip install -e ".[dev,encoder]" \
- && python -m pip install matplotlib pyarrow
+ && python -m pip install matplotlib pyarrow \
+ && python -c "import libero; from libero.libero import benchmark; print('libero_paths=' + str(list(libero.__path__))); print(sorted(benchmark.get_benchmark_dict()))"
 
 # ── copy remaining source ─────────────────────────────────────────────────────
 COPY scripts ./scripts
