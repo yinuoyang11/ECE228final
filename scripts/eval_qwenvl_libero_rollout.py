@@ -53,6 +53,7 @@ def main() -> None:
     parser.add_argument("--video-view", choices=("agentview", "wrist", "both"), default="agentview")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--qwen-lora-adapter", default=None, help="Optional QwenVL LoRA adapter directory.")
     args = parser.parse_args()
 
     os.environ.setdefault("MUJOCO_GL", "egl")
@@ -60,7 +61,7 @@ def main() -> None:
     prepare_libero_runtime_paths()
     set_seed(args.seed)
     device = torch.device(args.device)
-    qwen_encoder, policy = load_model(Path(args.checkpoint), device)
+    qwen_encoder, policy = load_model(Path(args.checkpoint), device, args.qwen_lora_adapter)
 
     from libero.libero import benchmark, get_libero_path
     from libero.libero.envs import OffScreenRenderEnv
@@ -154,22 +155,44 @@ def main() -> None:
     print(f"saved_metrics={metrics_path}")
 
 
-def load_model(checkpoint_path: Path, device: torch.device) -> tuple[QwenVLTokenEncoder, QwenVLFlowPolicy]:
+def load_model(
+    checkpoint_path: Path,
+    device: torch.device,
+    qwen_lora_adapter: str | None = None,
+) -> tuple[QwenVLTokenEncoder, QwenVLFlowPolicy]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
     train_args = checkpoint.get("args", {})
     config = QwenVLFlowConfig(**checkpoint["config"])
+    adapter_path = resolve_lora_adapter_path(checkpoint_path, checkpoint, qwen_lora_adapter)
     qwen_encoder = QwenVLTokenEncoder(
         model_name=config.qwen_model,
         min_pixels=int(train_args.get("qwen_min_pixels", 256 * 28 * 28)),
         max_pixels=int(train_args.get("qwen_max_pixels", 512 * 28 * 28)),
         dtype=str(train_args.get("qwen_dtype", "bfloat16")),
         device=device,
+        lora_adapter_path=adapter_path,
     )
     policy = QwenVLFlowPolicy(config).to(device)
     policy.load_state_dict(checkpoint["policy"])
     qwen_encoder.eval()
     policy.eval()
     return qwen_encoder, policy
+
+
+def resolve_lora_adapter_path(
+    checkpoint_path: Path,
+    checkpoint: dict,
+    override: str | None,
+) -> Path | None:
+    if override:
+        return Path(override)
+    saved = checkpoint.get("qwen_lora_adapter")
+    if not saved:
+        return None
+    path = Path(saved)
+    if not path.is_absolute():
+        path = checkpoint_path.parent / path
+    return path
 
 
 if __name__ == "__main__":

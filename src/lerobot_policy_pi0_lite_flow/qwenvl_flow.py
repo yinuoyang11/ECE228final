@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -53,6 +55,12 @@ class QwenVLTokenEncoder(nn.Module):
         max_pixels: int = 512 * 28 * 28,
         dtype: str = "bfloat16",
         device: torch.device | str | None = None,
+        lora_enabled: bool = False,
+        lora_scope: str = "vision",
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_adapter_path: str | Path | None = None,
     ) -> None:
         super().__init__()
         try:
@@ -73,16 +81,27 @@ class QwenVLTokenEncoder(nn.Module):
         torch_dtype = _resolve_torch_dtype(dtype)
         if torch_dtype != "auto":
             model_kwargs["torch_dtype"] = torch_dtype
+        self.lora_enabled = lora_enabled or lora_adapter_path is not None
+        self.lora_scope = lora_scope
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name, **model_kwargs)
-        if device is not None:
-            self.model.to(device)
-        self.model.eval()
         for param in self.model.parameters():
             param.requires_grad = False
+        if lora_adapter_path is not None:
+            self._load_lora_adapter(lora_adapter_path)
+        elif lora_enabled:
+            self._enable_lora(lora_scope=lora_scope, r=lora_r, alpha=lora_alpha, dropout=lora_dropout)
+        if device is not None:
+            self.model.to(device)
+        self.model.train(mode=self.lora_enabled)
         self.output_dim = int(getattr(self.model.config, "hidden_size", 0) or self.model.config.text_config.hidden_size)
+        if self.lora_enabled:
+            self._assert_only_lora_trainable()
 
-    @torch.no_grad()
     def forward(self, batch: Mapping[str, Any]) -> dict[str, Tensor]:
+        with torch.no_grad() if not self.lora_enabled else nullcontext():
+            return self._forward_impl(batch)
+
+    def _forward_impl(self, batch: Mapping[str, Any]) -> dict[str, Tensor]:
         images = _require_tensor(batch, "images")
         instructions = batch.get("instruction")
         if not isinstance(instructions, Sequence) or isinstance(instructions, (str, bytes)):
@@ -123,10 +142,65 @@ class QwenVLTokenEncoder(nn.Module):
             attention_mask = torch.ones(hidden.shape[:2], dtype=torch.bool, device=hidden.device)
         else:
             attention_mask = attention_mask.bool()
+        hidden = hidden if self.lora_enabled else hidden.detach()
         return {
-            "context_tokens": hidden.detach(),
+            "context_tokens": hidden,
             "context_attention_mask": attention_mask.detach(),
         }
+
+    def save_lora_adapter(self, path: str | Path) -> None:
+        if not self.lora_enabled:
+            return
+        if not hasattr(self.model, "save_pretrained"):
+            raise RuntimeError("Qwen model does not support save_pretrained for LoRA adapter saving")
+        self.model.save_pretrained(str(path))
+
+    def trainable_parameter_names(self) -> list[str]:
+        return [name for name, param in self.named_parameters() if param.requires_grad]
+
+    def _enable_lora(self, lora_scope: str, r: int, alpha: int, dropout: float) -> None:
+        if lora_scope != "vision":
+            raise ValueError(f"Only vision LoRA is supported in this path, got {lora_scope!r}")
+        try:
+            from peft import LoraConfig, get_peft_model
+        except ImportError as exc:  # pragma: no cover - optional heavy dependency.
+            raise ImportError("Install peft>=0.17.0 to enable QwenVL LoRA fine-tuning.") from exc
+
+        target_modules = _find_visual_lora_target_modules(self.model)
+        if not target_modules:
+            raise RuntimeError("No Qwen visual Linear modules found for LoRA injection")
+        config = LoraConfig(
+            r=r,
+            lora_alpha=alpha,
+            lora_dropout=dropout,
+            target_modules=target_modules,
+            bias="none",
+        )
+        self.model = get_peft_model(self.model, config)
+        self.lora_enabled = True
+        self._assert_only_lora_trainable()
+
+    def _load_lora_adapter(self, path: str | Path) -> None:
+        try:
+            from peft import PeftModel
+        except ImportError as exc:  # pragma: no cover - optional heavy dependency.
+            raise ImportError("Install peft>=0.17.0 to load a QwenVL LoRA adapter.") from exc
+
+        self.model = PeftModel.from_pretrained(self.model, str(path), is_trainable=False)
+        self.lora_enabled = False
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def _assert_only_lora_trainable(self) -> None:
+        bad = [
+            name
+            for name, param in self.model.named_parameters()
+            if param.requires_grad
+            and ("lora" not in name.lower() or not (name.startswith("visual.") or ".visual." in name))
+        ]
+        if bad:
+            preview = ", ".join(bad[:5])
+            raise RuntimeError(f"Only visual LoRA params may be trainable; found: {preview}")
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -406,6 +480,16 @@ def _make_qwen_message(agentview: Image.Image, wrist: Image.Image, instruction: 
             ],
         }
     ]
+
+
+def _find_visual_lora_target_modules(model: nn.Module) -> list[str]:
+    targets = []
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Linear):
+            continue
+        if name.startswith("visual.") or ".visual." in name:
+            targets.append(name)
+    return sorted(targets)
 
 
 def _extract_qwen_images(messages: list[list[dict[str, Any]]]) -> list[Image.Image]:

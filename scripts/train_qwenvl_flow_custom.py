@@ -34,6 +34,11 @@ def main() -> None:
     parser.add_argument("--qwen-dtype", choices=("auto", "bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--qwen-min-pixels", type=int, default=256 * 28 * 28)
     parser.add_argument("--qwen-max-pixels", type=int, default=512 * 28 * 28)
+    parser.add_argument("--qwen-lora", action="store_true", help="Train vision-only LoRA adapters in QwenVL.")
+    parser.add_argument("--qwen-lora-r", type=int, default=8)
+    parser.add_argument("--qwen-lora-alpha", type=int, default=16)
+    parser.add_argument("--qwen-lora-dropout", type=float, default=0.05)
+    parser.add_argument("--qwen-lora-lr", type=float, default=1e-5)
     parser.add_argument("--horizon", type=int, default=16)
     parser.add_argument("--action-dim", type=int, default=7)
     parser.add_argument("--state-dim", type=int, default=8)
@@ -77,6 +82,11 @@ def main() -> None:
         max_pixels=args.qwen_max_pixels,
         dtype=args.qwen_dtype,
         device=device,
+        lora_enabled=args.qwen_lora,
+        lora_scope="vision",
+        lora_r=args.qwen_lora_r,
+        lora_alpha=args.qwen_lora_alpha,
+        lora_dropout=args.qwen_lora_dropout,
     )
     action_stats = load_action_stats(args.repo_id)
     config = QwenVLFlowConfig(
@@ -92,11 +102,24 @@ def main() -> None:
         num_inference_timesteps=args.num_inference_timesteps,
     )
     policy = QwenVLFlowPolicy(config, dataset_stats={ACTION: action_stats}).to(device)
-    optimizer = torch.optim.AdamW(policy.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    qwen_trainable = sum(param.numel() for param in qwen_encoder.parameters() if param.requires_grad)
+    qwen_lora_params = [param for param in qwen_encoder.parameters() if param.requires_grad]
+    head_params = [param for param in policy.parameters() if param.requires_grad]
+    optimizer_groups = [{"params": head_params, "lr": args.lr}]
+    if qwen_lora_params:
+        optimizer_groups.append({"params": qwen_lora_params, "lr": args.qwen_lora_lr})
+    optimizer = torch.optim.AdamW(optimizer_groups, weight_decay=args.weight_decay)
+    qwen_trainable = sum(param.numel() for param in qwen_lora_params)
     head_trainable = sum(param.numel() for param in policy.parameters() if param.requires_grad)
+    total_trainable = qwen_trainable + head_trainable
+    trainable_qwen_names = qwen_encoder.trainable_parameter_names()
     print(f"run_dir={run_dir}")
-    print(f"device={device} qwen_trainable_params={qwen_trainable} head_trainable_params={head_trainable}")
+    print(
+        f"device={device} qwen_lora_trainable_params={qwen_trainable} "
+        f"head_trainable_params={head_trainable} total_trainable_params={total_trainable}"
+    )
+    print(f"qwen_trainable_names={trainable_qwen_names[:10]}")
+    qwen_encoder.train(mode=args.qwen_lora)
+    policy.train()
 
     optimizer.zero_grad(set_to_none=True)
     step = 0
@@ -110,8 +133,7 @@ def main() -> None:
             timing["data_wait"] += batch_start - last_batch_end
             batch = move_batch_to_device(batch, device)
             qwen_start = time.perf_counter()
-            with torch.no_grad():
-                encoded = qwen_encoder(batch)
+            encoded = qwen_encoder(batch)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             timing["qwen_encode"] += time.perf_counter() - qwen_start
@@ -140,7 +162,10 @@ def main() -> None:
             optimizer_start = time.perf_counter()
             grad_norm = None
             if args.clip_grad_norm > 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), args.clip_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    [*head_params, *qwen_lora_params],
+                    args.clip_grad_norm,
+                )
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             if device.type == "cuda":
@@ -169,11 +194,19 @@ def main() -> None:
             timing = new_timing()
             last_batch_end = time.perf_counter()
             if args.save_every > 0 and step % args.save_every == 0:
-                save_checkpoint(run_dir / f"checkpoint_step_{step:06d}.pt", step, policy, optimizer, args, config)
+                save_checkpoint(
+                    run_dir / f"checkpoint_step_{step:06d}.pt",
+                    step,
+                    policy,
+                    qwen_encoder,
+                    optimizer,
+                    args,
+                    config,
+                )
             if step >= args.steps:
                 break
 
-    save_checkpoint(run_dir / "checkpoint_final.pt", step, policy, optimizer, args, config)
+    save_checkpoint(run_dir / "checkpoint_final.pt", step, policy, qwen_encoder, optimizer, args, config)
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -183,6 +216,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("grad-accum-steps must be positive")
     if args.task_indices is None or not args.task_indices:
         raise ValueError("task-indices must contain at least one task")
+    if args.qwen_lora_r <= 0:
+        raise ValueError("qwen-lora-r must be positive")
+    if args.qwen_lora_alpha <= 0:
+        raise ValueError("qwen-lora-alpha must be positive")
+    if args.qwen_lora_lr <= 0:
+        raise ValueError("qwen-lora-lr must be positive")
 
 
 def new_timing() -> dict[str, float]:
@@ -248,10 +287,16 @@ def save_checkpoint(
     path: Path,
     step: int,
     policy: QwenVLFlowPolicy,
+    qwen_encoder: QwenVLTokenEncoder,
     optimizer: torch.optim.Optimizer,
     args: argparse.Namespace,
     config: QwenVLFlowConfig,
 ) -> None:
+    adapter_dir = None
+    if args.qwen_lora:
+        adapter_name = "qwen_lora_adapter" if path.name == "checkpoint_final.pt" else f"{path.stem}_qwen_lora_adapter"
+        adapter_dir = path.parent / adapter_name
+        qwen_encoder.save_lora_adapter(adapter_dir)
     torch.save(
         {
             "step": step,
@@ -259,6 +304,7 @@ def save_checkpoint(
             "config": vars(config),
             "policy": policy.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "qwen_lora_adapter": adapter_dir.name if adapter_dir is not None else None,
         },
         path,
     )

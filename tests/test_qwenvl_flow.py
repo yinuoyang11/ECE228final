@@ -1,7 +1,15 @@
 import torch
+from torch import nn
+from types import MethodType
 
 from lerobot_policy_pi0_lite_flow.modeling_pi0_lite_flow import ACTION
-from lerobot_policy_pi0_lite_flow.qwenvl_flow import QwenVLFlowConfig, QwenVLFlowPolicy, TokenFlowActionHead
+from lerobot_policy_pi0_lite_flow.qwenvl_flow import (
+    QwenVLFlowConfig,
+    QwenVLFlowPolicy,
+    QwenVLTokenEncoder,
+    TokenFlowActionHead,
+    _find_visual_lora_target_modules,
+)
 
 
 def make_config() -> QwenVLFlowConfig:
@@ -90,3 +98,62 @@ def test_qwenvl_policy_checkpoint_state_loads(tmp_path):
     chunk = restored.predict_action_chunk(make_batch(batch_size=1))
 
     assert chunk.shape == (1, config.horizon, config.action_dim)
+
+
+def test_qwen_visual_lora_target_discovery_only_selects_visual_linears():
+    class FakeQwen(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.visual = nn.Module()
+            self.visual.patch_embed = nn.Linear(3, 4)
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList([nn.Linear(4, 4)])
+
+    targets = _find_visual_lora_target_modules(FakeQwen())
+
+    assert targets == ["visual.patch_embed"]
+
+
+def test_qwen_trainable_safety_rejects_non_visual_or_non_lora_params():
+    class FakeQwen(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.visual = nn.Module()
+            self.visual.lora_A = nn.Linear(2, 2)
+            self.model = nn.Module()
+            self.model.bad_lora = nn.Linear(2, 2)
+
+    encoder = QwenVLTokenEncoder.__new__(QwenVLTokenEncoder)
+    nn.Module.__init__(encoder)
+    encoder.model = FakeQwen()
+    for name, param in encoder.model.named_parameters():
+        param.requires_grad = "lora" in name
+
+    try:
+        encoder._assert_only_lora_trainable()
+    except RuntimeError as exc:
+        assert "bad_lora" in str(exc)
+    else:
+        raise AssertionError("Expected non-visual LoRA trainable parameter to be rejected")
+
+
+def test_qwen_forward_detaches_only_in_frozen_mode():
+    source = torch.randn(2, 3, requires_grad=True)
+
+    def fake_forward_impl(self, batch):
+        return {
+            "context_tokens": source * 2,
+            "context_attention_mask": torch.ones(2, 3, dtype=torch.bool),
+        }
+
+    encoder = QwenVLTokenEncoder.__new__(QwenVLTokenEncoder)
+    nn.Module.__init__(encoder)
+    encoder._forward_impl = MethodType(fake_forward_impl, encoder)
+
+    encoder.lora_enabled = False
+    frozen = encoder.forward({})
+    assert not frozen["context_tokens"].requires_grad
+
+    encoder.lora_enabled = True
+    trainable = encoder.forward({})
+    assert trainable["context_tokens"].requires_grad

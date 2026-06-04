@@ -28,6 +28,7 @@ encoder = [
     "safetensors>=0.4",
     "av>=12.0",
     "qwen-vl-utils>=0.0.8",
+    "peft>=0.17.0",
 ]
 
 [tool.setuptools.packages.find]
