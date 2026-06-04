@@ -28,6 +28,22 @@ def test_representation_encoder_outputs_decoder_condition_shape():
     assert not torch.isnan(cond).any()
 
 
+def test_cached_features_match_raw_encoder_path():
+    encoder = RepresentationEncoder(RepresentationEncoderConfig(cond_dim=256, num_views=2, dropout=0.0))
+    encoder.eval()
+    batch = make_encoder_batch()
+
+    features = encoder.extract_features(batch)
+    raw_cond = encoder(batch)
+    cached_cond = encoder.forward_from_features(
+        features["image_features"],
+        batch["state"],
+        features["text_features"],
+    )
+
+    assert torch.allclose(raw_cond, cached_cond)
+
+
 def test_representation_encoder_adds_condition_key_for_flow_policy():
     config = PI0LiteFlowConfig(
         horizon=16,
@@ -148,6 +164,20 @@ def test_action_chunk_dataset_filters_tasks_without_changing_episode_chunks():
     assert len(dataset) == 2
     assert dataset[0]["instruction"] == "task 1"
     assert dataset[0]["action"][:, 0].tolist() == [3.0, 4.0]
+
+
+def test_action_chunk_dataset_uses_task_metadata_when_frame_has_no_text():
+    base = FakeLIBERODataset()
+    for row in base.rows:
+        row.pop("task")
+    dataset = LIBEROActionChunkDataset(
+        base_dataset=base,
+        horizon=2,
+        task_indices=[1],
+        task_descriptions={1: "pick up the orange juice and place it in the basket"},
+    )
+
+    assert dataset[0]["instruction"] == "pick up the orange juice and place it in the basket"
 
 
 class FakeCLIPBranch(nn.Module):

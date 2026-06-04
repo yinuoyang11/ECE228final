@@ -10,5 +10,6 @@ __pycache__
 build
 dist
 runs
+artifacts
 checkpoints
 rollout_videos

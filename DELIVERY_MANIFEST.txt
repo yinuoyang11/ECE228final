@@ -1,0 +1,35 @@
+CLIP Autoregressive Task 20 Delivery Manifest
+
+Required for source-code training and evaluation:
+  README.md
+  pyproject.toml
+  requirements.txt
+  src/
+  scripts/
+  tests/
+
+Required for loading the trained model:
+  artifacts/autoregressive_clip_task20_3000/checkpoint_final.pt
+  artifacts/autoregressive_clip_task20_3000/args.json
+
+Optional evaluation speed-up:
+  artifacts/autoregressive_clip_task20_3000/eval_features.pt
+
+Report results:
+  results/autoregressive_clip_task20_3000/args.json
+  results/autoregressive_clip_task20_3000/metrics.json
+  results/autoregressive_clip_task20_3000/training_metrics.csv
+  results/autoregressive_clip_task20_3000/training_curves.png
+  results/autoregressive_clip_task20_3000/eval_comparison.png
+  results/autoregressive_clip_task20_3000/inference_latency.png
+  results/autoregressive_clip_task20_3000/results_table.tex
+
+LIBERO success-rate rollout:
+  scripts/eval_autoregressive_libero_rollout.py
+  Dockerfile
+  scripts/docker_build.sh
+
+External downloads not included:
+  Frozen CLIP weights: openai/clip-vit-base-patch32
+  LIBERO simulator and assets
+  HuggingFaceVLA/libero dataset

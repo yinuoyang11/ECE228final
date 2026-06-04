@@ -101,7 +101,7 @@ class PI0LiteAutoregressiveConfig(PreTrainedConfig):
         """
         action_feature = getattr(self, "action_feature", None)
         output_features = getattr(self, "output_features", None)
-        if output_features is not None and action_feature is None:
+        if output_features and action_feature is None:
             raise ValueError(
                 "PI0LiteAutoregressivePolicy requires an action output feature."
             )

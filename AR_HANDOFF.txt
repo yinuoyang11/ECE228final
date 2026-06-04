@@ -1,0 +1,48 @@
+CLIP Autoregressive LIBERO Baseline
+
+This folder contains the complete autoregressive baseline code, final evaluation
+results, and the final checkpoint needed for LIBERO success-rate rollout.
+
+Task:
+  task_index: 20
+  instruction: pick up the orange juice and place it in the basket
+
+Training:
+  encoder: frozen openai/clip-vit-base-patch32
+  device: mps
+  steps: 3000
+  batch size: 8
+
+Important paths:
+  Final checkpoint:
+    artifacts/autoregressive_clip_task20_3000/checkpoint_final.pt
+
+  Training arguments:
+    artifacts/autoregressive_clip_task20_3000/args.json
+
+  Optional held-out CLIP feature cache:
+    artifacts/autoregressive_clip_task20_3000/eval_features.pt
+
+  Evaluation results and figures:
+    results/autoregressive_clip_task20_3000/
+
+  Training script:
+    scripts/train_baselines.py
+
+  Evaluation script:
+    scripts/evaluate_baselines.py
+
+  LIBERO success-rate rollout script:
+    scripts/eval_autoregressive_libero_rollout.py
+
+Success-rate rollout requires a Linux/EGL LIBERO environment and ffmpeg.
+The included Dockerfile supports this with:
+  INSTALL_LIBERO=1 bash scripts/docker_build.sh
+
+CLIP weights are not included because the frozen pretrained model is downloaded
+from Hugging Face using the model name above.
+
+Verified final offline metrics:
+  MSE: 0.07155398182676284
+  L1: 0.10270089294285925
+  token accuracy: 0.45754866544248207

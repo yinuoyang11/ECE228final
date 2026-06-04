@@ -107,6 +107,38 @@ def test_loss_is_finite_and_backpropagates():
     )
 
 
+def test_causal_decoder_future_token_does_not_change_earlier_logits():
+    decoder = make_decoder()
+    decoder.eval()
+    cond = torch.randn(1, 32)
+    tokens_a = torch.randint(0, 16, (1, 12))
+    tokens_b = tokens_a.clone()
+    changed_index = 7
+    tokens_b[:, changed_index] = (tokens_b[:, changed_index] + 1) % 16
+
+    logits_a = decoder(tokens_a, cond)
+    logits_b = decoder(tokens_b, cond)
+
+    assert torch.allclose(logits_a[:, : changed_index + 1], logits_b[:, : changed_index + 1])
+
+
+def test_padded_tokens_do_not_change_loss_or_accuracy():
+    decoder = make_decoder()
+    decoder.eval()
+    cond = torch.randn(2, 32)
+    tokens_a = torch.randint(0, 16, (2, 12))
+    tokens_b = tokens_a.clone()
+    tokens_b[:, 8:] = (tokens_b[:, 8:] + 3) % 16
+    token_is_pad = torch.zeros_like(tokens_a, dtype=torch.bool)
+    token_is_pad[:, 8:] = True
+
+    output_a = decoder.loss(tokens_a, cond, token_is_pad=token_is_pad)
+    output_b = decoder.loss(tokens_b, cond, token_is_pad=token_is_pad)
+
+    assert torch.allclose(output_a["loss"], output_b["loss"])
+    assert torch.allclose(output_a["accuracy"], output_b["accuracy"])
+
+
 def test_sample_shape():
     decoder = make_decoder()
     cond = torch.randn(3, 32)
@@ -197,6 +229,24 @@ def test_policy_forward_and_loss():
     assert "accuracy" in output
 
 
+def test_policy_forward_accepts_action_padding_mask():
+    config = PI0LiteAutoregressiveConfig(
+        horizon=4, action_dim=3, cond_dim=32, num_bins=16,
+        hidden_dim=64, nhead=4, num_layers=2, dim_feedforward=128,
+        dropout=0.0,
+    )
+    policy = AutoregressivePolicy(config)
+    output = policy(
+        {
+            ACTION: torch.randn(2, 4, 3),
+            "action_is_pad": torch.tensor([[False, False, True, True], [False, False, False, True]]),
+            COND_KEY: torch.randn(2, 32),
+        }
+    )
+
+    assert torch.isfinite(output["loss"])
+
+
 def test_policy_predict_action_chunk():
     config = PI0LiteAutoregressiveConfig(
         horizon=4, action_dim=3, cond_dim=32, num_bins=16,
@@ -243,6 +293,13 @@ def test_policy_without_dataset_stats():
     }
     output = policy.forward(batch)
     assert torch.isfinite(output["loss"])
+
+
+def test_empty_output_feature_map_does_not_require_lerobot_action_feature():
+    config = PI0LiteAutoregressiveConfig()
+    config.output_features = {}
+
+    config.validate_features()
 
 
 def test_policy_with_mean_std_stats():
