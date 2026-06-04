@@ -58,10 +58,14 @@ RUN python -m pip install \
     "pyyaml>=6.0" \
     "easydict>=1.9" \
     "cloudpickle>=2.1" \
+    "future>=0.18.2" \
     "gym==0.25.2" \
     "bddl==1.0.1" \
     "termcolor>=2.0" \
     "imageio>=2.31" \
+    "opencv-python-headless>=4.9" \
+    "hydra-core>=1.3" \
+    "thop>=0.1.1.post2209072238" \
     "tqdm>=4.64"
 
 # ── LIBERO (from source) ──────────────────────────────────────────────────────
