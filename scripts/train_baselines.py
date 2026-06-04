@@ -200,7 +200,11 @@ def main() -> None:
     history: list[dict[str, float]] = []
     metrics_path = run_dir / "metrics.csv"
     with metrics_path.open("w", newline="") as metrics_file:
-        writer = csv.DictWriter(metrics_file, fieldnames=["step", "loss", "ce_loss", "accuracy", "grad_norm"])
+        writer = csv.DictWriter(
+            metrics_file,
+            fieldnames=["step", "loss", "ce_loss", "accuracy", "grad_norm"],
+            lineterminator="\n",
+        )
         writer.writeheader()
         iterator = iter(train_loader)
         encoder.train()
