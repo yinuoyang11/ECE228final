@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import random
+import shutil
 import subprocess
 import sys
 from typing import Any
@@ -170,19 +171,29 @@ def prepare_libero_runtime_paths() -> None:
     runtime_root = Path(os.environ.get("LIBERO_RUNTIME_ROOT", hf_home / "libero_runtime"))
     assets_dir = Path(os.environ.get("LIBERO_ASSETS_DIR", runtime_root / "assets"))
     config_dir = Path(os.environ.get("LIBERO_RUNTIME_CONFIG_DIR", runtime_root / "config"))
+    home_dir = Path(os.environ.get("LIBERO_RUNTIME_HOME", runtime_root / "home"))
+    xdg_cache_dir = Path(os.environ.get("LIBERO_RUNTIME_XDG_CACHE", runtime_root / "xdg_cache"))
     assets_dir.mkdir(parents=True, exist_ok=True)
     config_dir.mkdir(parents=True, exist_ok=True)
+    home_dir.mkdir(parents=True, exist_ok=True)
+    xdg_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    os.environ["HOME"] = str(home_dir)
+    os.environ["XDG_CACHE_HOME"] = str(xdg_cache_dir)
 
     required_asset = assets_dir / "scenes" / "libero_floor_base_style.xml"
     if not required_asset.exists():
         snapshot_download(repo_id="lerobot/libero-assets", repo_type="dataset", local_dir=str(assets_dir))
+
+    libero_cache_assets_dir = home_dir / ".cache" / "libero" / "assets"
+    _ensure_assets_alias(assets_dir, libero_cache_assets_dir)
 
     libero_root = _find_libero_package_root()
     config_path = config_dir / "config.yaml"
     config_path.write_text(
         "\n".join(
             [
-                f"assets: {assets_dir}",
+                f"assets: {libero_cache_assets_dir}",
                 f"bddl_files: {libero_root / 'bddl_files'}",
                 f"benchmark_root: {libero_root}",
                 f"datasets: {libero_root / '../datasets'}",
@@ -193,6 +204,25 @@ def prepare_libero_runtime_paths() -> None:
         encoding="utf-8",
     )
     os.environ["LIBERO_CONFIG_PATH"] = str(config_dir)
+    os.environ["LIBERO_ASSETS_DIR"] = str(libero_cache_assets_dir)
+
+
+def _ensure_assets_alias(source_dir: Path, alias_dir: Path) -> None:
+    required_asset = alias_dir / "scenes" / "libero_floor_base_style.xml"
+    if required_asset.exists():
+        return
+
+    alias_dir.parent.mkdir(parents=True, exist_ok=True)
+    if alias_dir.exists() or alias_dir.is_symlink():
+        if alias_dir.is_symlink() or alias_dir.is_file():
+            alias_dir.unlink()
+        else:
+            shutil.rmtree(alias_dir)
+
+    try:
+        alias_dir.symlink_to(source_dir, target_is_directory=True)
+    except OSError:
+        shutil.copytree(source_dir, alias_dir, dirs_exist_ok=True)
 
 
 def _find_libero_package_root() -> Path:
