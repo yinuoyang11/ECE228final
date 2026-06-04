@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -101,14 +102,23 @@ def main() -> None:
     step = 0
     micro_step = 0
     printed_context_shape = False
+    timing = new_timing()
+    last_batch_end = time.perf_counter()
     while step < args.steps:
         for batch in loader:
+            batch_start = time.perf_counter()
+            timing["data_wait"] += batch_start - last_batch_end
             batch = move_batch_to_device(batch, device)
+            qwen_start = time.perf_counter()
             with torch.no_grad():
                 encoded = qwen_encoder(batch)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            timing["qwen_encode"] += time.perf_counter() - qwen_start
             if not printed_context_shape:
                 print(f"context_tokens_shape={tuple(encoded['context_tokens'].shape)}")
                 printed_context_shape = True
+            policy_start = time.perf_counter()
             policy_batch = {
                 "context_tokens": encoded["context_tokens"],
                 "context_attention_mask": encoded["context_attention_mask"],
@@ -119,17 +129,26 @@ def main() -> None:
             output = policy(policy_batch)
             loss = output["loss"] / args.grad_accum_steps
             loss.backward()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            timing["policy_backward"] += time.perf_counter() - policy_start
             micro_step += 1
             if micro_step % args.grad_accum_steps != 0:
+                last_batch_end = time.perf_counter()
                 continue
 
+            optimizer_start = time.perf_counter()
             grad_norm = None
             if args.clip_grad_norm > 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), args.clip_grad_norm)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            timing["optimizer"] += time.perf_counter() - optimizer_start
             step += 1
             if step % args.log_every == 0:
+                step_total = sum(timing.values())
                 row = {
                     "step": step,
                     "micro_step": micro_step,
@@ -138,9 +157,17 @@ def main() -> None:
                     "pred_velocity_norm": float(output["pred_velocity_norm"].detach().cpu()),
                     "target_velocity_norm": float(output["target_velocity_norm"].detach().cpu()),
                     "grad_norm": float(grad_norm.detach().cpu()) if isinstance(grad_norm, torch.Tensor) else "",
+                    "data_wait_sec": timing["data_wait"],
+                    "qwen_encode_sec": timing["qwen_encode"],
+                    "policy_backward_sec": timing["policy_backward"],
+                    "optimizer_sec": timing["optimizer"],
+                    "step_total_sec": step_total,
+                    "micro_avg_sec": step_total / max(args.grad_accum_steps, 1),
                 }
                 append_metrics(log_path, row)
                 print(" ".join(f"{key}={value}" for key, value in row.items()))
+            timing = new_timing()
+            last_batch_end = time.perf_counter()
             if args.save_every > 0 and step % args.save_every == 0:
                 save_checkpoint(run_dir / f"checkpoint_step_{step:06d}.pt", step, policy, optimizer, args, config)
             if step >= args.steps:
@@ -156,6 +183,15 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("grad-accum-steps must be positive")
     if args.task_indices is None or not args.task_indices:
         raise ValueError("task-indices must contain at least one task")
+
+
+def new_timing() -> dict[str, float]:
+    return {
+        "data_wait": 0.0,
+        "qwen_encode": 0.0,
+        "policy_backward": 0.0,
+        "optimizer": 0.0,
+    }
 
 
 def move_batch_to_device(batch: dict, device: torch.device) -> dict:
