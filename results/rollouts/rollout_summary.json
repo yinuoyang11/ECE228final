@@ -1,0 +1,72 @@
+[
+  {
+    "scenario": "Task20-ep0",
+    "task": 20,
+    "start": 0,
+    "frames": 200,
+    "avg_mse": 0.015458290158567251
+  },
+  {
+    "scenario": "Task20-ep15",
+    "task": 20,
+    "start": 2076,
+    "frames": 200,
+    "avg_mse": 0.020501807486762117
+  },
+  {
+    "scenario": "Task20-ep30",
+    "task": 20,
+    "start": 4152,
+    "frames": 200,
+    "avg_mse": 0.013429010537947761
+  },
+  {
+    "scenario": "Task21-ep0",
+    "task": 21,
+    "start": 0,
+    "frames": 200,
+    "avg_mse": 0.014213291897176532
+  },
+  {
+    "scenario": "Task21-ep11",
+    "task": 21,
+    "start": 1729,
+    "frames": 200,
+    "avg_mse": 0.01708059382477586
+  },
+  {
+    "scenario": "Task21-ep22",
+    "task": 21,
+    "start": 3459,
+    "frames": 200,
+    "avg_mse": 0.01480450710907462
+  },
+  {
+    "scenario": "Task21-ep34",
+    "task": 21,
+    "start": 5189,
+    "frames": 200,
+    "avg_mse": 0.026912261530378602
+  },
+  {
+    "scenario": "Task22-ep0",
+    "task": 22,
+    "start": 0,
+    "frames": 200,
+    "avg_mse": 0.022874540556949798
+  },
+  {
+    "scenario": "Task22-ep18",
+    "task": 22,
+    "start": 2551,
+    "frames": 200,
+    "avg_mse": 0.019882153449725593
+  },
+  {
+    "scenario": "Task22-ep33",
+    "task": 22,
+    "start": 4783,
+    "frames": 200,
+    "avg_mse": 0.018166273331298725
+  }
+]

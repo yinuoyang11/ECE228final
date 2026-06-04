@@ -1,3 +1,12 @@
+"""Custom LIBERO training loop for the BC regression baseline.
+
+This mirrors scripts/train_flow_custom.py so the regression baseline is trained
+on the exact same data pipeline, encoder, and optimizer setup as the flow
+matching policy. The only differences are the policy class (BCRegressionPolicy)
+and an optional ``--freeze-encoder`` switch for loading a pretrained encoder
+checkpoint and training only the regression decoder.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -16,9 +25,13 @@ from torch.utils.data import DataLoader, Subset
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from lerobot_policy_pi0_lite_flow.configuration_pi0_lite_flow import PI0LiteFlowConfig  # noqa: E402
+from lerobot_policy_pi0_lite_flow.configuration_regression import BCRegressionConfig  # noqa: E402
 from lerobot_policy_pi0_lite_flow.libero_adapter import LIBEROActionChunkDataset  # noqa: E402
-from lerobot_policy_pi0_lite_flow.modeling_pi0_lite_flow import ACTION, COND_KEY, PI0LiteFlowPolicy  # noqa: E402
+from lerobot_policy_pi0_lite_flow.modeling_regression import (  # noqa: E402
+    ACTION,
+    COND_KEY,
+    BCRegressionPolicy,
+)
 from lerobot_policy_pi0_lite_flow.representation_encoder import (  # noqa: E402
     CLIPImageEncoder,
     CLIPTextEncoder,
@@ -28,7 +41,7 @@ from lerobot_policy_pi0_lite_flow.representation_encoder import (  # noqa: E402
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Minimal custom LIBERO training loop for pi0-lite flow.")
+    parser = argparse.ArgumentParser(description="Custom LIBERO training loop for the BC regression baseline.")
     parser.add_argument("--repo-id", default="HuggingFaceVLA/libero")
     parser.add_argument("--local-dir", default=None, help="Path to locally downloaded LIBERO dataset (skips HF Hub download).")
     parser.add_argument("--task-indices", nargs="+", type=int, default=None, help="Optional LIBERO task indices to train.")
@@ -44,6 +57,9 @@ def main() -> None:
     parser.add_argument("--action-dim", type=int, default=7)
     parser.add_argument("--state-dim", type=int, default=8)
     parser.add_argument("--cond-dim", type=int, default=256)
+    parser.add_argument("--hidden-dim", type=int, default=256)
+    parser.add_argument("--num-layers", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--max-samples", type=int, default=128)
@@ -52,14 +68,34 @@ def main() -> None:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--use-clip", action="store_true", help="Use CLIP image/text encoders instead of mocks.")
     parser.add_argument("--clip-model", default="openai/clip-vit-base-patch32")
-    parser.add_argument("--finetune-clip-vision-layers", type=int, default=0, help="Unfreeze the last N CLIP vision layers. Use -1 for all.")
-    parser.add_argument("--finetune-clip-text-layers", type=int, default=0, help="Unfreeze the last N CLIP text layers. Use -1 for all.")
+    parser.add_argument(
+        "--finetune-clip-vision-layers",
+        type=int,
+        default=0,
+        help="Unfreeze the last N CLIP vision layers. Use -1 for all.",
+    )
+    parser.add_argument(
+        "--finetune-clip-text-layers",
+        type=int,
+        default=0,
+        help="Unfreeze the last N CLIP text layers. Use -1 for all.",
+    )
     parser.add_argument("--clip-lr", type=float, default=1e-5, help="Learning rate for unfrozen CLIP parameters.")
+    parser.add_argument(
+        "--freeze-encoder",
+        action="store_true",
+        help="Freeze the entire representation encoder; train only the regression decoder. "
+        "Requires --init-checkpoint to provide encoder weights for a fair comparison.",
+    )
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--output-dir", default="results")
     parser.add_argument("--run-name", default=None)
-    parser.add_argument("--init-checkpoint", default=None, help="Initialize encoder and policy weights from a checkpoint.")
+    parser.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Initialize encoder (and optionally policy) weights from a flow or regression checkpoint.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--clip-grad-norm", type=float, default=1.0)
@@ -111,16 +147,25 @@ def main() -> None:
         image_encoder=image_encoder,
         text_encoder=text_encoder,
     ).to(device)
-    policy = PI0LiteFlowPolicy(
-        PI0LiteFlowConfig(
+    policy = BCRegressionPolicy(
+        BCRegressionConfig(
             horizon=args.horizon,
             action_dim=args.action_dim,
             cond_dim=args.cond_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
         ),
         dataset_stats={ACTION: load_action_stats(args.repo_id, local_dir=args.local_dir)},
     ).to(device)
     if args.init_checkpoint:
         load_initial_weights(Path(args.init_checkpoint), encoder, policy, device)
+
+    if args.freeze_encoder:
+        for param in encoder.parameters():
+            param.requires_grad = False
+        encoder.eval()
+        print("encoder_frozen=True")
 
     clip_params = [
         param
@@ -134,12 +179,16 @@ def main() -> None:
     ]
     base_params.extend(param for param in policy.parameters() if param.requires_grad)
     trainable_params = [*base_params, *clip_params]
-    optimizer_groups = [{"params": base_params, "lr": args.lr}]
+    if not trainable_params:
+        raise RuntimeError("No trainable parameters; check --freeze-encoder configuration.")
+
+    optimizer_groups = [{"params": base_params, "lr": args.lr}] if base_params else []
     if clip_params:
         optimizer_groups.append({"params": clip_params, "lr": args.clip_lr})
     optimizer = torch.optim.AdamW(optimizer_groups, weight_decay=args.weight_decay)
 
-    encoder.train()
+    if not args.freeze_encoder:
+        encoder.train()
     policy.train()
     print(f"run_dir={run_dir}")
     print(
@@ -151,7 +200,11 @@ def main() -> None:
         for batch in loader:
             step += 1
             batch = _move_batch_to_device(batch, device)
-            cond = encoder(batch)
+            if args.freeze_encoder:
+                with torch.no_grad():
+                    cond = encoder(batch)
+            else:
+                cond = encoder(batch)
             policy_batch = {
                 COND_KEY: cond,
                 ACTION: batch[ACTION].float(),
@@ -171,9 +224,9 @@ def main() -> None:
                 row = {
                     "step": step,
                     "loss": float(loss.detach().cpu()),
-                    "fm_loss": float(output["fm_loss"].detach().cpu()),
-                    "pred_velocity_norm": float(output["pred_velocity_norm"].detach().cpu()),
-                    "target_velocity_norm": float(output["target_velocity_norm"].detach().cpu()),
+                    "mse_loss": float(output["mse_loss"].detach().cpu()),
+                    "pred_action_norm": float(output["pred_action_norm"].detach().cpu()),
+                    "target_action_norm": float(output["target_action_norm"].detach().cpu()),
                     "grad_norm": float(grad_norm.detach().cpu()) if isinstance(grad_norm, torch.Tensor) else "",
                 }
                 append_metrics(log_path, row)
@@ -211,6 +264,12 @@ def validate_clip_args(args: argparse.Namespace) -> None:
         raise ValueError("CLIP finetuning requires --use-clip")
     if args.clip_lr <= 0:
         raise ValueError("clip-lr must be positive")
+    if args.freeze_encoder and not args.init_checkpoint:
+        raise ValueError(
+            "--freeze-encoder requires --init-checkpoint so the encoder uses pretrained weights instead of random init."
+        )
+    if args.freeze_encoder and any(layer_counts):
+        raise ValueError("--freeze-encoder is incompatible with CLIP finetuning layer counts")
 
 
 def make_run_dir(output_dir: str, run_name: str | None) -> Path:
@@ -259,7 +318,7 @@ def save_checkpoint(
     path: Path,
     step: int,
     encoder: RepresentationEncoder,
-    policy: PI0LiteFlowPolicy,
+    policy: BCRegressionPolicy,
     optimizer: torch.optim.Optimizer,
     args: argparse.Namespace,
 ) -> None:
@@ -279,15 +338,23 @@ def save_checkpoint(
 def load_initial_weights(
     path: Path,
     encoder: RepresentationEncoder,
-    policy: PI0LiteFlowPolicy,
+    policy: BCRegressionPolicy,
     device: torch.device,
 ) -> None:
+    """Load encoder weights from any flow/regression checkpoint; policy only loads if shapes match."""
     checkpoint = torch.load(path, map_location=device)
     _, unexpected = encoder.load_state_dict(checkpoint["encoder"], strict=False)
+    unexpected = [key for key in unexpected if not key.startswith(("image_encoder.model.", "text_encoder.model."))]
     if unexpected:
         raise RuntimeError(f"Unexpected encoder checkpoint keys: {unexpected}")
-    policy.load_state_dict(checkpoint["policy"])
-    print(f"initialized_from={path}")
+    policy_state = checkpoint.get("policy")
+    if policy_state is not None:
+        try:
+            policy.load_state_dict(policy_state, strict=False)
+            print(f"initialized_policy_from={path}")
+        except RuntimeError as exc:
+            print(f"skipped_policy_init (incompatible state dict): {exc}")
+    print(f"initialized_encoder_from={path}")
 
 
 def trainable_state_dict(module: torch.nn.Module) -> dict[str, torch.Tensor]:

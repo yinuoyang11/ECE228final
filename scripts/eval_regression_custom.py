@@ -1,3 +1,10 @@
+"""Offline LIBERO evaluation for the BC regression baseline.
+
+Mirrors scripts/eval_flow_custom.py so the regression baseline reports the
+exact same metrics on the same held-out LIBERO samples, enabling a direct
+comparison against the flow matching policy.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -14,9 +21,12 @@ from torch.utils.data import DataLoader, Subset
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from lerobot_policy_pi0_lite_flow.configuration_pi0_lite_flow import PI0LiteFlowConfig  # noqa: E402
+from lerobot_policy_pi0_lite_flow.configuration_regression import BCRegressionConfig  # noqa: E402
 from lerobot_policy_pi0_lite_flow.libero_adapter import LIBEROActionChunkDataset  # noqa: E402
-from lerobot_policy_pi0_lite_flow.modeling_pi0_lite_flow import ACTION, PI0LiteFlowPolicy  # noqa: E402
+from lerobot_policy_pi0_lite_flow.modeling_regression import (  # noqa: E402
+    ACTION,
+    BCRegressionPolicy,
+)
 from lerobot_policy_pi0_lite_flow.representation_encoder import (  # noqa: E402
     CLIPImageEncoder,
     CLIPTextEncoder,
@@ -26,7 +36,7 @@ from lerobot_policy_pi0_lite_flow.representation_encoder import (  # noqa: E402
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Offline validation for the custom pi0-lite flow pipeline.")
+    parser = argparse.ArgumentParser(description="Offline validation for the BC regression baseline.")
     parser.add_argument("checkpoint", help="Path to checkpoint_final.pt or checkpoint_step_*.pt")
     parser.add_argument("--repo-id", default=None)
     parser.add_argument("--local-dir", default=None, help="Path to locally downloaded LIBERO dataset.")
@@ -43,7 +53,6 @@ def main() -> None:
     parser.add_argument("--skip-samples", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--num-steps", type=int, default=None, help="Flow Euler inference steps. Defaults to config.")
     parser.add_argument("--output", default=None, help="Optional CSV path for the aggregate metrics.")
     args = parser.parse_args()
 
@@ -55,6 +64,9 @@ def main() -> None:
     action_dim = int(train_args.get("action_dim", 7))
     state_dim = int(train_args.get("state_dim", 8))
     cond_dim = int(train_args.get("cond_dim", 256))
+    hidden_dim = int(train_args.get("hidden_dim", 256))
+    num_layers = int(train_args.get("num_layers", 4))
+    dropout = float(train_args.get("dropout", 0.0))
     clip_model = train_args.get("clip_model", "openai/clip-vit-base-patch32")
     use_clip = bool(train_args.get("use_clip", True))
     task_indices = args.task_indices if args.task_indices is not None else train_args.get("task_indices")
@@ -95,17 +107,19 @@ def main() -> None:
         image_encoder=image_encoder,
         text_encoder=text_encoder,
     ).to(device)
-    missing, unexpected = encoder.load_state_dict(checkpoint["encoder"], strict=False)
+    _, unexpected = encoder.load_state_dict(checkpoint["encoder"], strict=False)
     unexpected = [key for key in unexpected if not key.startswith(("image_encoder.model.", "text_encoder.model."))]
     if unexpected:
         raise RuntimeError(f"Unexpected encoder checkpoint keys: {unexpected}")
 
-    policy = PI0LiteFlowPolicy(
-        PI0LiteFlowConfig(
+    policy = BCRegressionPolicy(
+        BCRegressionConfig(
             horizon=horizon,
             action_dim=action_dim,
             cond_dim=cond_dim,
-            inference_steps=int(args.num_steps or train_args.get("inference_steps", 8)),
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout,
         )
     ).to(device)
     policy.load_state_dict(checkpoint["policy"])
@@ -140,7 +154,7 @@ def main() -> None:
                 torch.cuda.synchronize()
             start_time = time.perf_counter()
             cond = encoder(batch)
-            pred = policy.decoder.sample(cond, num_steps=policy.config.inference_steps)
+            pred = policy.decoder.predict(cond, denormalize=True)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             elapsed = time.perf_counter() - start_time
@@ -208,4 +222,3 @@ def write_metrics_csv(path: Path, metrics: dict[str, str | int | float]) -> None
 
 if __name__ == "__main__":
     main()
-

@@ -14,5 +14,10 @@ dist/
 *.log
 runs/
 checkpoints/
+# Large binary outputs – commit CSVs/JSONs but not model weights or videos
+results/**/*.pt
+results/**/*.mp4
+results/**/*.png
+results/**/*.svg
 .DS_Store
 Thumbs.db

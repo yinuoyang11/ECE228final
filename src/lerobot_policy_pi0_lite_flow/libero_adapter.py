@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
 from torch.utils.data import Dataset
 from torch import Tensor
+
+from . import _hf_compat  # noqa: F401 - side effect: patch HF symlink on Windows
 
 
 DEFAULT_IMAGE_KEYS = ("observation.images.image", "observation.images.image2")
@@ -52,24 +55,38 @@ class LIBEROActionChunkDataset(Dataset):
         horizon: int = 16,
         base_dataset: Any | None = None,
         task_indices: Sequence[int] | None = None,
+        episodes: Sequence[int] | None = None,
         image_keys: Sequence[str] = DEFAULT_IMAGE_KEYS,
         state_key: str = "observation.state",
         action_key: str = "action",
         instruction_keys: Sequence[str] = DEFAULT_INSTRUCTION_KEYS,
+        root: str | Path | None = None,
     ) -> None:
         if horizon <= 0:
             raise ValueError("horizon must be positive")
+        if task_indices is not None and episodes is not None:
+            raise ValueError("pass either task_indices or episodes, not both")
 
         self.horizon = horizon
         self.image_keys = tuple(image_keys)
         self.state_key = state_key
         self.action_key = action_key
         self.instruction_keys = tuple(instruction_keys)
-        self.dataset = base_dataset if base_dataset is not None else self._load_lerobot_dataset(repo_id)
+        self.task_indices = tuple(sorted(set(task_indices))) if task_indices is not None else None
+        self.episodes = sorted(set(int(e) for e in episodes)) if episodes is not None else None
+        self.root = Path(root) if root is not None else None
+        if base_dataset is not None:
+            self.dataset = base_dataset
+        else:
+            self.dataset = self._load_lerobot_dataset(
+                repo_id,
+                task_indices=self.task_indices,
+                episodes=self.episodes,
+                root=self.root,
+            )
         self.episode_ranges = _episode_ranges(self.dataset)
         self.index_to_episode_end = _index_to_episode_end(self.episode_ranges)
         self.action_source = _make_action_source(self.dataset, action_key)
-        self.task_indices = tuple(sorted(set(task_indices))) if task_indices is not None else None
         self.selected_indices = _indices_for_tasks(self.dataset, self.episode_ranges, self.task_indices)
 
     def __len__(self) -> int:
@@ -111,12 +128,99 @@ class LIBEROActionChunkDataset(Dataset):
         return action_chunk, action_is_pad
 
     @staticmethod
-    def _load_lerobot_dataset(repo_id: str):
+    def _load_lerobot_dataset(
+        repo_id: str,
+        task_indices: Sequence[int] | None = None,
+        episodes: Sequence[int] | None = None,
+        root: Path | None = None,
+    ):
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
         except ImportError as exc:  # pragma: no cover - exercised only when LeRobot is missing.
             raise ImportError("Install lerobot[dataset] to load LIBEROActionChunkDataset by repo_id.") from exc
-        return LeRobotDataset(repo_id)
+
+        if root is not None:
+            # Local dataset: pass root directly, no HF Hub interaction needed.
+            common_kwargs: dict = {"root": root}
+        else:
+            # force_cache_sync=True is a workaround for a lerobot 0.5.1 bug:
+            # ``DatasetReader.try_load`` only catches ``FileNotFoundError`` /
+            # ``NotADirectoryError``. When the local cache contains zero data
+            # parquet shards (or any are missing), the underlying ``datasets``
+            # library raises a ``ValueError("Instruction 'train' corresponds to no
+            # data!")`` which bubbles up uncaught, so the automatic download path
+            # inside ``LeRobotDataset.__init__`` never runs. Forcing cache sync
+            # skips ``try_load`` and calls ``_download`` directly. On subsequent
+            # runs the already-cached files are validated via HEAD requests in a
+            # few seconds and only missing shards are downloaded.
+            common_kwargs = {"force_cache_sync": True}
+
+        if episodes is not None:
+            return LeRobotDataset(repo_id, episodes=list(episodes), **common_kwargs)
+
+        if task_indices is None:
+            return LeRobotDataset(repo_id, **common_kwargs)
+
+        target_episodes = resolve_task_episodes(repo_id, task_indices, local_root=root)
+        if not target_episodes:
+            raise ValueError(
+                f"No episodes match task_indices {sorted(set(task_indices))} in {repo_id!r}."
+            )
+        return LeRobotDataset(repo_id, episodes=target_episodes, **common_kwargs)
+
+
+def resolve_task_episodes(
+    repo_id: str,
+    task_indices: Iterable[int],
+    local_root: str | Path | None = None,
+) -> list[int]:
+    """Return episode indices whose ``task_index`` is in ``task_indices``.
+
+    If ``local_root`` is given, reads meta parquet files directly from that
+    directory (no network access). Otherwise downloads ``meta/*`` files from
+    the Hugging Face Hub.
+    """
+
+    import pyarrow.parquet as pq
+
+    selected = {int(t) for t in task_indices}
+    if not selected:
+        raise ValueError("task_indices must contain at least one task index")
+    if any(t < 0 for t in selected):
+        raise ValueError("task_indices must be non-negative")
+
+    if local_root is not None:
+        local_meta_root = Path(local_root)
+    else:
+        from huggingface_hub import snapshot_download
+        local_meta_root = Path(snapshot_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            allow_patterns=["meta/*"],
+        ))
+
+    meta_dir = local_meta_root / "meta" / "episodes"
+    if not meta_dir.exists():
+        raise FileNotFoundError(f"Expected meta/episodes/ under {local_meta_root}")
+
+    parquet_files = sorted(meta_dir.glob("chunk-*/file-*.parquet"))
+    if not parquet_files:
+        raise FileNotFoundError(f"No episodes parquet files under {meta_dir}")
+
+    episodes: list[int] = []
+    for pf in parquet_files:
+        tbl = pq.read_table(pf, columns=["episode_index", "stats/task_index/min"])
+        ep_col = tbl.column("episode_index").to_pylist()
+        task_col = tbl.column("stats/task_index/min").to_pylist()
+        for ep_idx, task_value in zip(ep_col, task_col, strict=True):
+            if hasattr(task_value, "__len__") and not isinstance(task_value, (str, bytes)):
+                task_int = int(task_value[0])
+            else:
+                task_int = int(task_value)
+            if task_int in selected:
+                episodes.append(int(ep_idx))
+
+    return sorted(set(episodes))
 
 
 def _stack_sample_images(sample: Mapping[str, Any], image_keys: Sequence[str]) -> Tensor:
@@ -156,6 +260,8 @@ def _to_tensor(value: Any) -> Tensor:
 
 
 def _episode_ranges(dataset: Any) -> list[tuple[int, int]]:
+    dataset_len = len(dataset)
+
     meta = getattr(dataset, "meta", None)
     episodes = getattr(meta, "episodes", None)
     if episodes is not None:
@@ -163,14 +269,19 @@ def _episode_ranges(dataset: Any) -> list[tuple[int, int]]:
         for row in episodes:
             if "dataset_from_index" in row and "dataset_to_index" in row:
                 ranges.append((int(row["dataset_from_index"]), int(row["dataset_to_index"])))
-        if ranges:
+        # Only trust meta-derived ranges when they reference indices within the
+        # actual loaded dataset. When the caller passed ``episodes=[...]`` to
+        # LeRobotDataset, the underlying PyArrow table is filtered/reindexed but
+        # ``meta.episodes`` still describes the unfiltered dataset, so the
+        # from/to indices would point past ``len(dataset)``.
+        if ranges and max(end for _, end in ranges) <= dataset_len:
             return ranges
 
+    episode_column = _scan_episode_index_column(dataset, dataset_len)
     ranges = []
     current_start = 0
     current_episode = None
-    for idx in range(len(dataset)):
-        episode = int(_to_tensor(dataset[idx]["episode_index"]).item())
+    for idx, episode in enumerate(episode_column):
         if current_episode is None:
             current_episode = episode
             current_start = idx
@@ -179,8 +290,25 @@ def _episode_ranges(dataset: Any) -> list[tuple[int, int]]:
             current_episode = episode
             current_start = idx
     if current_episode is not None:
-        ranges.append((current_start, len(dataset)))
+        ranges.append((current_start, dataset_len))
     return ranges
+
+
+def _scan_episode_index_column(dataset: Any, dataset_len: int) -> list[int]:
+    """Read the ``episode_index`` column as a fast list[int] without decoding
+    images. Falls back to per-row access if the column shortcut is unavailable."""
+
+    hf_dataset = getattr(dataset, "hf_dataset", None)
+    if hf_dataset is not None:
+        try:
+            return [int(v) for v in hf_dataset.with_format(None)["episode_index"]]
+        except Exception:
+            try:
+                return [int(v) for v in hf_dataset["episode_index"]]
+            except Exception:
+                pass
+
+    return [int(_to_tensor(dataset[idx]["episode_index"]).item()) for idx in range(dataset_len)]
 
 
 def _index_to_episode_end(ranges: Sequence[tuple[int, int]]) -> list[int]:
