@@ -1,148 +1,288 @@
-# Discretized Autoregressive Action-Token Model Baseline (ECE 228 Final)
+# pi0-lite Flow Action Decoder
 
-This package provides a custom policy baseline for language-conditioned robot manipulation, evaluated on the **LIBERO** benchmark (Task 20). It is designed to plug into the overall project pipeline built by the team.
+This package provides a LeRobot-style custom policy plugin centered on a conditional flow matching action decoder for continuous action chunks.
 
-This specific baseline implements a **Discretized Autoregressive Action Token** policy (similar to OpenVLA).
+The current module expects a precomputed conditioning vector in `batch["observation.cond"]` and trains on raw action chunks in `batch["action"]`.
 
-## Architecture Overview
+## Vision-Language Condition Input
 
-### Upstream: RepresentationEncoder (Teammate)
-- Encodes **dual-view RGB images** (third-person + wrist camera) via CLIP vision encoder
-- Encodes **language instructions** via CLIP text encoder
-- Encodes **robot proprioceptive state** (8-dim) via MLP
-- Fuses all modalities into a 256-dim conditioning vector via a learned MLP fusion layer
+This policy does not directly consume raw images, text strings, token ids, or
+vision-language token sequences. Instead, it expects a precomputed fused
+vision-language conditioning vector for each batch item.
 
-### Downstream: Autoregressive Decoder (This Baseline)
-- Each action dimension is binned into 256 discrete tokens (uniform bins)
-- A causal Transformer autoregressively predicts the token sequence
-- Trained with cross-entropy loss (next-token prediction)
-- At inference, tokens are sampled one at a time and decoded back to continuous values
+The default condition key and shape are:
 
-## Dataset
+```python
+batch["observation.cond"]  # torch.Tensor, shape: (B, cond_dim)
+```
 
-We natively use the team's `LIBEROActionChunkDataset` adapter, which pulls from the complete LIBERO benchmark:
-- **Repo ID**: `HuggingFaceVLA/libero`
-- **Task**: Task 20 specifically
-- **Observations**: Dual-view RGB images (`image` and `image2`) + 8-dim proprioceptive state
-- **Actions**: 7-dim (6 DOF arm + gripper), chunked with horizon=16
-- **Split**: 80% train / 20% test, seed=42
+The default configuration uses `cond_dim = 256`, so the default condition tensor
+shape is:
 
-## Quick Start
+```python
+batch["observation.cond"].shape == (B, 256)
+```
 
-### Environment Setup
+The fallback key `batch["cond"]` is also accepted. During training, the batch
+must also include action chunks:
+
+```python
+batch = {
+    "observation.cond": cond.float(),       # (B, 256) by default
+    "action": actions.float(),              # (B, horizon, action_dim)
+    "action_is_pad": pad_mask.bool(),       # optional, (B, horizon)
+}
+```
+
+With the default policy config, actions have shape `(B, 16, 7)`. At inference
+time, only the condition vector is required:
+
+```python
+batch = {
+    "observation.cond": cond.float(),  # (B, 256) by default
+}
+
+action = policy.select_action(batch)   # (B, action_dim)
+```
+
+If the upstream vision-language encoder outputs a single embedding with a
+different width, either set `config.cond_dim` to that width or add a projection
+layer before passing the embedding to the policy:
+
+```python
+cond = projector(vl_embedding)  # (B, 256)
+batch["observation.cond"] = cond
+```
+
+If the upstream encoder outputs a token sequence such as `(B, N, D)`, pool or
+select a representative token first, then optionally project it to `cond_dim`:
+
+```python
+pooled = vl_tokens.mean(dim=1)  # (B, D)
+cond = projector(pooled)        # (B, 256)
+```
+
+## Representation Encoder
+
+This package includes a lightweight upstream encoder that converts LIBERO-style
+image, state, and instruction inputs into the condition key expected by the flow
+decoder:
+
+```python
+from lerobot_policy_pi0_lite_flow.representation_encoder import (
+    RepresentationEncoder,
+    RepresentationEncoderConfig,
+)
+
+encoder = RepresentationEncoder(RepresentationEncoderConfig(cond_dim=256, num_views=2))
+batch = {
+    "images": images,              # (B, V, C, H, W)
+    "state": state,                # (B, 8) for LIBERO
+    "instruction": instructions,   # list[str]
+}
+batch = encoder.add_condition_to_batch(batch)
+batch["observation.cond"].shape == (B, 256)
+```
+
+The current encoder path is:
+
+```text
+observation.images.image  -> frozen CLIP image encoder -> z_img1
+observation.images.image2 -> frozen CLIP image encoder -> z_img2
+task                      -> frozen CLIP text encoder  -> z_text
+observation.state         -> state MLP                 -> z_state
+
+concat/project/fuse(z_img1, z_img2, z_text, z_state) -> observation.cond
+```
+
+For `HuggingFaceVLA/libero`, the inspected sample fields are:
+
+| Field | Shape / type |
+| --- | --- |
+| `observation.images.image` | `(3, 256, 256)`, `float32` |
+| `observation.images.image2` | `(3, 256, 256)`, `float32` |
+| `observation.state` | `(8,)`, `float32` |
+| `task` | `str` |
+| `action` | `(7,)`, `float32` |
+
+`LIBEROActionChunkDataset` wraps these frame-level samples and builds future
+action chunks without crossing episode boundaries:
+
+```python
+{
+    "images": ...,        # (B, 2, 3, 256, 256)
+    "state": ...,         # (B, 8)
+    "instruction": ...,   # list[str]
+    "action": ...,        # (B, horizon, 7)
+    "action_is_pad": ..., # (B, horizon)
+}
+```
+
+For a CLIP-backed smoke test, run:
+
+```powershell
+python scripts\smoke_clip_encoder.py
+```
+
+For a minimal custom training loop on LIBERO action chunks, run a short mock
+encoder smoke test first:
+
+```powershell
+python scripts\train_flow_custom.py --steps 3 --max-samples 16 --batch-size 2
+```
+
+Add `--use-clip` to train the fusion layers and decoder with frozen CLIP image
+and text features. The training script writes `args.json`, `metrics.csv`, and
+checkpoints under `runs/pi0_lite_flow/<run-name>/` by default:
+
+```powershell
+python scripts\train_flow_custom.py `
+  --use-clip `
+  --steps 1000 `
+  --max-samples 5000 `
+  --batch-size 8 `
+  --lr 1e-4 `
+  --save-every 250 `
+  --run-name clip_flow_h16_smoke
+```
+
+Convenience launch scripts are also provided:
+
+```powershell
+.\scripts\train_clip_debug.ps1
+.\scripts\train_clip_1k.ps1
+```
+
+If PowerShell blocks local scripts, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\train_clip_debug.ps1
+```
+
+If `python` is not on PATH, set the `PYTHON` environment variable first:
+
+```powershell
+$env:PYTHON="C:\Users\admin\.conda\envs\ece228_pi0_py312\python.exe"
+.\scripts\train_clip_debug.ps1
+```
+
+From Git Bash or a Unix-like shell:
 
 ```bash
+bash scripts/train_clip_debug.sh
+bash scripts/train_clip_1k.sh
+```
+
+Plot a saved training curve with:
+
+```powershell
+python scripts\plot_metrics.py runs\pi0_lite_flow\clip_flow_h16_debug\metrics.csv
+```
+
+Run offline validation on held-out LIBERO samples with:
+
+```powershell
+python scripts\eval_flow_custom.py `
+  runs\pi0_lite_flow\clip_flow_h16_1k\checkpoint_final.pt `
+  --num-samples 512 `
+  --batch-size 8 `
+  --output runs\pi0_lite_flow\clip_flow_h16_1k\eval.csv
+```
+
+## Current Encoder Results
+
+The first 1000-step CLIP run used:
+
+```text
+dataset: HuggingFaceVLA/libero
+train samples: first 5000 frame indices
+validation samples: indices 5000-5511
+horizon: 16
+batch size: 8
+condition dimension: 256
+GPU: NVIDIA GeForce RTX 5060 Ti
+```
+
+Training loss decreased substantially:
+
+| Metric | Value |
+| --- | ---: |
+| first-step loss | 1.5355 |
+| final-step loss | 0.4177 |
+| minimum loss | 0.2489 at step 952 |
+| average first 100 steps | 1.0942 |
+| average last 100 steps | 0.4168 |
+
+![CLIP flow training loss](docs/figures/clip_flow_h16_1k_loss.svg)
+
+Held-out offline validation on 512 samples:
+
+| Metric | Value |
+| --- | ---: |
+| action MSE | 0.2633 |
+| action L1 | 0.3686 |
+| predicted action smoothness | 1.0836 |
+| latency per sample | 0.0048 s |
+
+These numbers show that the representation encoder, action chunk dataset, and
+flow decoder training loop are functional. They are not yet a final comparison
+against BC or autoregressive-token baselines.
+
+## Environment
+
+```powershell
 conda create -n ece228-pi0lite python=3.12
 conda activate ece228-pi0lite
-pip install torch torchvision einops pytest matplotlib transformers datasets
-pip install -e .
+pip install -e ".[dev,encoder]"
+pytest
 ```
 
-### Train the Autoregressive Baseline
+For local core checks before LeRobot is installed, run:
+
+```powershell
+$env:PYTHONPATH="src"
+pytest
+```
+
+## Docker Training
+
+See [`docs/server_training.md`](docs/server_training.md) for the complete Ubuntu
+GPU server setup.
+
+The Linux GPU container persists checkpoints under `runs/` and Hugging Face
+downloads under `~/.cache/huggingface` on the host. Install Docker with the
+NVIDIA Container Toolkit, then run:
 
 ```bash
-PYTHONPATH=src python scripts/train_baselines.py --epochs 100 --batch_size 32
+bash scripts/docker_build.sh
+bash scripts/docker_train.sh
 ```
 
-This seamlessly downloads the **real LIBERO Task 20 image dataset**, trains the Autoregressive model jointly with the RepresentationEncoder, and saves:
-- Model checkpoints → `checkpoints/`
-- Training history + eval results → `checkpoints/results.json`
-
-### Evaluate and Generate Plots
+Build with the optional Linux-only LIBERO simulator dependencies when preparing
+the same image for future headless rollouts:
 
 ```bash
-PYTHONPATH=src python scripts/evaluate_baselines.py
-```
-PYTHONPATH=src python scripts/evaluate_baselines.py
+INSTALL_LIBERO=1 bash scripts/docker_build.sh
 ```
 
-Generates:
-- Training loss curves → `results/training_curves.png`
-- Evaluation metric comparison → `results/eval_comparison.png`
-- Inference latency comparison → `results/inference_latency.png`
-- LaTeX table for report → `results/results_table.tex`
+The Docker launcher defaults to all available LIBERO samples. Override its
+environment variables for a short smoke run or a longer experiment:
 
-## Project Structure
-
-```
-ECE228final/
-├── src/lerobot_policy_pi0_lite_flow/
-│   ├── __init__.py
-│   ├── action_tokenizer.py              # Discretizes actions into tokens
-│   ├── configuration_autoregressive.py   # Autoregressive baseline config
-│   ├── configuration_pi0_lite_flow.py    # Flow matching config
-│   ├── libero_adapter.py                # LIBERO dataset adapter (teammate)
-│   ├── modeling_autoregressive.py        # Autoregressive decoder + policy
-│   ├── modeling_pi0_lite_flow.py         # Flow matching decoder + policy
-│   ├── processor_pi0_lite_flow.py        # Data processors
-│   └── representation_encoder.py         # CLIP + state encoder (teammate)
-├── scripts/
-│   ├── train_baselines.py               # Train all three methods on LIBERO
-│   └── evaluate_baselines.py            # Generate comparison plots
-├── tests/
-│   ├── test_autoregressive.py           # 15 tests for autoregressive baseline
-│   └── test_flow_decoder.py             # 6 tests for flow matching
-├── checkpoints/                         # Trained model weights
-├── results/                             # Generated plots and tables
-├── pyproject.toml
-├── environment.yml
-└── README.md
+```bash
+STEPS=3 MAX_SAMPLES=16 BATCH_SIZE=2 RUN_NAME=smoke bash scripts/docker_train.sh
+STEPS=100000 BATCH_SIZE=8 RUN_NAME=clip_flow_full bash scripts/docker_train.sh
 ```
 
-## Usage Examples
+Read the dataset metadata without downloading the full video dataset:
 
-### Autoregressive Policy
-
-```python
-from lerobot_policy_pi0_lite_flow import (
-    PI0LiteAutoregressiveConfig,
-    AutoregressivePolicy,
-)
-
-config = PI0LiteAutoregressiveConfig(
-    horizon=16, action_dim=7, cond_dim=256,
-    num_bins=256, hidden_dim=256, nhead=8, num_layers=4,
-)
-dataset_stats = {
-    "action": {
-        "min": action_min,  # (action_dim,)
-        "max": action_max,  # (action_dim,)
-    }
-}
-policy = AutoregressivePolicy(config, dataset_stats=dataset_stats)
-
-# Training
-batch = {"observation.cond": cond, "action": actions}
-output = policy.forward(batch)
-loss = output["loss"]  # Cross-entropy loss
-accuracy = output["accuracy"]  # Token prediction accuracy
-
-# Inference
-batch = {"observation.cond": cond}
-action_chunk = policy.predict_action_chunk(batch)  # (B, 16, 7)
-single_action = policy.select_action(batch)  # (B, 7) with chunk caching
+```bash
+python scripts/inspect_libero_metadata.py
+python scripts/inspect_libero_metadata.py --list-tasks
 ```
 
-### Flow Matching Policy
+Train one shared model on a selected subset of LIBERO tasks:
 
-```python
-from lerobot_policy_pi0_lite_flow import PI0LiteFlowConfig, PI0LiteFlowPolicy
-
-config = PI0LiteFlowConfig(
-    horizon=16, action_dim=7, cond_dim=256,
-    hidden_dim=256, num_layers=4, inference_steps=8,
-)
-policy = PI0LiteFlowPolicy(config, dataset_stats=stats)
-
-# Same interface as autoregressive policy
-output = policy.forward(batch)        # flow matching loss
-chunk = policy.predict_action_chunk(batch)  # Euler ODE integration
-action = policy.select_action(batch)  # with chunk caching
+```bash
+STEPS=10000 RUN_NAME=tasks_0_1_2 \
+  bash scripts/docker_train.sh --task-indices 0 1 2
 ```
-
-## References
-
-- **π0**: Black et al., "π0: A Vision-Language-Action Flow Model for General Robot Control", arXiv:2410.24164, 2024.
-- **OpenVLA**: Kim et al., "OpenVLA: An Open-Source Vision-Language-Action Model", arXiv:2406.09246, 2024.
-- **Diffusion Policy**: Chi et al., "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion", RSS 2023.
-- **LIBERO**: Liu et al., "LIBERO: Benchmarking Knowledge Transfer for Lifelong Robot Learning", NeurIPS 2023.

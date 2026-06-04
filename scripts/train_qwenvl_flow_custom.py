@@ -1,0 +1,315 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import random
+import time
+from datetime import datetime
+from pathlib import Path
+import sys
+
+import torch
+from huggingface_hub import hf_hub_download
+from torch.utils.data import DataLoader, Subset
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from lerobot_policy_pi0_lite_flow.libero_adapter import LIBEROActionChunkDataset  # noqa: E402
+from lerobot_policy_pi0_lite_flow.modeling_pi0_lite_flow import ACTION  # noqa: E402
+from lerobot_policy_pi0_lite_flow.qwenvl_flow import (  # noqa: E402
+    QwenVLFlowConfig,
+    QwenVLFlowPolicy,
+    QwenVLTokenEncoder,
+)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train a frozen-QwenVL token flow action head on LIBERO.")
+    parser.add_argument("--repo-id", default="HuggingFaceVLA/libero")
+    parser.add_argument("--task-indices", nargs="+", type=int, default=[20])
+    parser.add_argument("--qwen-model", default="Qwen/Qwen2.5-VL-3B-Instruct")
+    parser.add_argument("--qwen-dtype", choices=("auto", "bfloat16", "float16", "float32"), default="bfloat16")
+    parser.add_argument("--qwen-min-pixels", type=int, default=256 * 28 * 28)
+    parser.add_argument("--qwen-max-pixels", type=int, default=512 * 28 * 28)
+    parser.add_argument("--qwen-lora", action="store_true", help="Train vision-only LoRA adapters in QwenVL.")
+    parser.add_argument("--qwen-lora-r", type=int, default=8)
+    parser.add_argument("--qwen-lora-alpha", type=int, default=16)
+    parser.add_argument("--qwen-lora-dropout", type=float, default=0.05)
+    parser.add_argument("--qwen-lora-lr", type=float, default=1e-5)
+    parser.add_argument("--horizon", type=int, default=16)
+    parser.add_argument("--action-dim", type=int, default=7)
+    parser.add_argument("--state-dim", type=int, default=8)
+    parser.add_argument("--embed-dim", type=int, default=896)
+    parser.add_argument("--hidden-dim", type=int, default=1024)
+    parser.add_argument("--num-layers", type=int, default=8)
+    parser.add_argument("--num-heads", type=int, default=8)
+    parser.add_argument("--num-inference-timesteps", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--grad-accum-steps", type=int, default=16)
+    parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--max-samples", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--log-every", type=int, default=1)
+    parser.add_argument("--save-every", type=int, default=500)
+    parser.add_argument("--output-dir", default="runs/qwenvl_flow")
+    parser.add_argument("--run-name", default=None)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--clip-grad-norm", type=float, default=1.0)
+    args = parser.parse_args()
+    validate_args(args)
+
+    set_seed(args.seed)
+    device = torch.device(args.device)
+    run_dir = make_run_dir(args.output_dir, args.run_name)
+    log_path = run_dir / "metrics.csv"
+    save_args(args, run_dir)
+
+    dataset = LIBEROActionChunkDataset(repo_id=args.repo_id, horizon=args.horizon, task_indices=args.task_indices)
+    if args.max_samples > 0:
+        dataset = Subset(dataset, range(min(args.max_samples, len(dataset))))
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    print(f"dataset_samples={len(dataset)} task_indices={args.task_indices}")
+
+    qwen_encoder = QwenVLTokenEncoder(
+        model_name=args.qwen_model,
+        min_pixels=args.qwen_min_pixels,
+        max_pixels=args.qwen_max_pixels,
+        dtype=args.qwen_dtype,
+        device=device,
+        lora_enabled=args.qwen_lora,
+        lora_scope="vision",
+        lora_r=args.qwen_lora_r,
+        lora_alpha=args.qwen_lora_alpha,
+        lora_dropout=args.qwen_lora_dropout,
+    )
+    action_stats = load_action_stats(args.repo_id)
+    config = QwenVLFlowConfig(
+        qwen_model=args.qwen_model,
+        context_dim=qwen_encoder.output_dim,
+        embed_dim=args.embed_dim,
+        hidden_dim=args.hidden_dim,
+        horizon=args.horizon,
+        action_dim=args.action_dim,
+        state_dim=args.state_dim,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        num_inference_timesteps=args.num_inference_timesteps,
+    )
+    policy = QwenVLFlowPolicy(config, dataset_stats={ACTION: action_stats}).to(device)
+    qwen_lora_params = [param for param in qwen_encoder.parameters() if param.requires_grad]
+    head_params = [param for param in policy.parameters() if param.requires_grad]
+    optimizer_groups = [{"params": head_params, "lr": args.lr}]
+    if qwen_lora_params:
+        optimizer_groups.append({"params": qwen_lora_params, "lr": args.qwen_lora_lr})
+    optimizer = torch.optim.AdamW(optimizer_groups, weight_decay=args.weight_decay)
+    qwen_trainable = sum(param.numel() for param in qwen_lora_params)
+    head_trainable = sum(param.numel() for param in policy.parameters() if param.requires_grad)
+    total_trainable = qwen_trainable + head_trainable
+    trainable_qwen_names = qwen_encoder.trainable_parameter_names()
+    print(f"run_dir={run_dir}")
+    print(
+        f"device={device} qwen_lora_trainable_params={qwen_trainable} "
+        f"head_trainable_params={head_trainable} total_trainable_params={total_trainable}"
+    )
+    print(f"qwen_trainable_names={trainable_qwen_names[:10]}")
+    qwen_encoder.train(mode=args.qwen_lora)
+    policy.train()
+
+    optimizer.zero_grad(set_to_none=True)
+    step = 0
+    micro_step = 0
+    printed_context_shape = False
+    timing = new_timing()
+    last_batch_end = time.perf_counter()
+    while step < args.steps:
+        for batch in loader:
+            batch_start = time.perf_counter()
+            timing["data_wait"] += batch_start - last_batch_end
+            batch = move_batch_to_device(batch, device)
+            qwen_start = time.perf_counter()
+            encoded = qwen_encoder(batch)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            timing["qwen_encode"] += time.perf_counter() - qwen_start
+            if not printed_context_shape:
+                print(f"context_tokens_shape={tuple(encoded['context_tokens'].shape)}")
+                printed_context_shape = True
+            policy_start = time.perf_counter()
+            policy_batch = {
+                "context_tokens": encoded["context_tokens"],
+                "context_attention_mask": encoded["context_attention_mask"],
+                "state": batch["state"].float(),
+                ACTION: batch[ACTION].float(),
+                "action_is_pad": batch["action_is_pad"],
+            }
+            output = policy(policy_batch)
+            loss = output["loss"] / args.grad_accum_steps
+            loss.backward()
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            timing["policy_backward"] += time.perf_counter() - policy_start
+            micro_step += 1
+            if micro_step % args.grad_accum_steps != 0:
+                last_batch_end = time.perf_counter()
+                continue
+
+            optimizer_start = time.perf_counter()
+            grad_norm = None
+            if args.clip_grad_norm > 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    [*head_params, *qwen_lora_params],
+                    args.clip_grad_norm,
+                )
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            timing["optimizer"] += time.perf_counter() - optimizer_start
+            step += 1
+            if step % args.log_every == 0:
+                step_total = sum(timing.values())
+                row = {
+                    "step": step,
+                    "micro_step": micro_step,
+                    "loss": float(output["loss"].detach().cpu()),
+                    "fm_loss": float(output["fm_loss"].detach().cpu()),
+                    "pred_velocity_norm": float(output["pred_velocity_norm"].detach().cpu()),
+                    "target_velocity_norm": float(output["target_velocity_norm"].detach().cpu()),
+                    "grad_norm": float(grad_norm.detach().cpu()) if isinstance(grad_norm, torch.Tensor) else "",
+                    "data_wait_sec": timing["data_wait"],
+                    "qwen_encode_sec": timing["qwen_encode"],
+                    "policy_backward_sec": timing["policy_backward"],
+                    "optimizer_sec": timing["optimizer"],
+                    "step_total_sec": step_total,
+                    "micro_avg_sec": step_total / max(args.grad_accum_steps, 1),
+                }
+                append_metrics(log_path, row)
+                print(" ".join(f"{key}={value}" for key, value in row.items()))
+            timing = new_timing()
+            last_batch_end = time.perf_counter()
+            if args.save_every > 0 and step % args.save_every == 0:
+                save_checkpoint(
+                    run_dir / f"checkpoint_step_{step:06d}.pt",
+                    step,
+                    policy,
+                    qwen_encoder,
+                    optimizer,
+                    args,
+                    config,
+                )
+            if step >= args.steps:
+                break
+
+    save_checkpoint(run_dir / "checkpoint_final.pt", step, policy, qwen_encoder, optimizer, args, config)
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.batch_size <= 0:
+        raise ValueError("batch-size must be positive")
+    if args.grad_accum_steps <= 0:
+        raise ValueError("grad-accum-steps must be positive")
+    if args.task_indices is None or not args.task_indices:
+        raise ValueError("task-indices must contain at least one task")
+    if args.qwen_lora_r <= 0:
+        raise ValueError("qwen-lora-r must be positive")
+    if args.qwen_lora_alpha <= 0:
+        raise ValueError("qwen-lora-alpha must be positive")
+    if args.qwen_lora_lr <= 0:
+        raise ValueError("qwen-lora-lr must be positive")
+
+
+def new_timing() -> dict[str, float]:
+    return {
+        "data_wait": 0.0,
+        "qwen_encode": 0.0,
+        "policy_backward": 0.0,
+        "optimizer": 0.0,
+    }
+
+
+def move_batch_to_device(batch: dict, device: torch.device) -> dict:
+    output = {}
+    for key, value in batch.items():
+        output[key] = value.to(device) if isinstance(value, torch.Tensor) else value
+    return output
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def make_run_dir(output_dir: str, run_name: str | None) -> Path:
+    root = Path(output_dir)
+    name = run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = root / name
+    if run_dir.exists():
+        suffix = 1
+        while (root / f"{name}_{suffix:03d}").exists():
+            suffix += 1
+        run_dir = root / f"{name}_{suffix:03d}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def save_args(args: argparse.Namespace, run_dir: Path) -> None:
+    with (run_dir / "args.json").open("w", encoding="utf-8") as file:
+        json.dump(vars(args), file, indent=2, sort_keys=True)
+
+
+def load_action_stats(repo_id: str) -> dict[str, torch.Tensor]:
+    path = hf_hub_download(repo_id=repo_id, filename="meta/stats.json", repo_type="dataset")
+    with open(path, encoding="utf-8") as file:
+        stats = json.load(file)["action"]
+    action_stats = {key: torch.tensor(stats[key], dtype=torch.float32) for key in ("mean", "std")}
+    print(f"action_mean={action_stats['mean'].tolist()} action_std={action_stats['std'].tolist()}")
+    return action_stats
+
+
+def append_metrics(path: Path, row: dict[str, int | float | str]) -> None:
+    write_header = not path.exists()
+    with path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def save_checkpoint(
+    path: Path,
+    step: int,
+    policy: QwenVLFlowPolicy,
+    qwen_encoder: QwenVLTokenEncoder,
+    optimizer: torch.optim.Optimizer,
+    args: argparse.Namespace,
+    config: QwenVLFlowConfig,
+) -> None:
+    adapter_dir = None
+    if args.qwen_lora:
+        adapter_name = "qwen_lora_adapter" if path.name == "checkpoint_final.pt" else f"{path.stem}_qwen_lora_adapter"
+        adapter_dir = path.parent / adapter_name
+        qwen_encoder.save_lora_adapter(adapter_dir)
+    torch.save(
+        {
+            "step": step,
+            "args": vars(args),
+            "config": vars(config),
+            "policy": policy.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "qwen_lora_adapter": adapter_dir.name if adapter_dir is not None else None,
+        },
+        path,
+    )
+    print(f"saved_checkpoint={path}")
+
+
+if __name__ == "__main__":
+    main()

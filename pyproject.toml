@@ -9,14 +9,26 @@ description = "LeRobot-style pi0-lite conditional flow matching action decoder."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "torch>=2.2",
+    "torch==2.7.1",
+    "torchcodec==0.5.0; sys_platform != 'win32'",
     "einops>=0.7",
-    "lerobot>=0.5.1",
+    "lerobot==0.5.1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+]
+encoder = [
+    "transformers==5.3.0",
+    "torchvision==0.22.1",
+    "datasets>=2.19",
+    "huggingface-hub>=0.23",
+    "accelerate>=0.30",
+    "safetensors>=0.4",
+    "av>=12.0",
+    "qwen-vl-utils>=0.0.8",
+    "peft>=0.17.0",
 ]
 
 [tool.setuptools.packages.find]

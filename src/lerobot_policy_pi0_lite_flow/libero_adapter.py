@@ -152,10 +152,6 @@ def _read_instruction(sample: Mapping[str, Any], keys: Sequence[str]) -> str:
 def _to_tensor(value: Any) -> Tensor:
     if isinstance(value, Tensor):
         return value
-    # Handle PIL images returned by HuggingFace datasets
-    if hasattr(value, "mode") and hasattr(value, "size") and callable(getattr(value, "convert", None)):
-        import numpy as np
-        value = np.array(value)
     return torch.as_tensor(value)
 
 
@@ -169,45 +165,6 @@ def _episode_ranges(dataset: Any) -> list[tuple[int, int]]:
                 ranges.append((int(row["dataset_from_index"]), int(row["dataset_to_index"])))
         if ranges:
             return ranges
-
-    # Check if we can extract the column directly (fast path for HuggingFace Dataset)
-    if hasattr(dataset, "column_names") and "episode_index" in dataset.column_names:
-        try:
-            episode_indices = dataset["episode_index"]
-            ranges = []
-            if len(episode_indices) > 0:
-                current_start = 0
-                current_episode = int(episode_indices[0])
-                for idx, episode in enumerate(episode_indices):
-                    episode_val = int(episode)
-                    if episode_val != current_episode:
-                        ranges.append((current_start, idx))
-                        current_episode = episode_val
-                        current_start = idx
-                ranges.append((current_start, len(episode_indices)))
-            return ranges
-        except Exception:
-            pass
-
-    # Also check if it wraps a hf_dataset (LeRobotDataset style)
-    hf_dataset = getattr(dataset, "hf_dataset", None)
-    if hf_dataset is not None and hasattr(hf_dataset, "column_names") and "episode_index" in hf_dataset.column_names:
-        try:
-            episode_indices = hf_dataset["episode_index"]
-            ranges = []
-            if len(episode_indices) > 0:
-                current_start = 0
-                current_episode = int(episode_indices[0])
-                for idx, episode in enumerate(episode_indices):
-                    episode_val = int(episode)
-                    if episode_val != current_episode:
-                        ranges.append((current_start, idx))
-                        current_episode = episode_val
-                        current_start = idx
-                ranges.append((current_start, len(episode_indices)))
-            return ranges
-        except Exception:
-            pass
 
     ranges = []
     current_start = 0
@@ -238,11 +195,6 @@ def _index_to_episode_end(ranges: Sequence[tuple[int, int]]) -> list[int]:
 
 
 def _make_action_source(dataset: Any, action_key: str) -> Any:
-    if hasattr(dataset, "select_columns"):
-        try:
-            return dataset.select_columns([action_key])
-        except Exception:
-            pass
     hf_dataset = getattr(dataset, "hf_dataset", None)
     if hf_dataset is not None and hasattr(hf_dataset, "select_columns"):
         try:
@@ -280,31 +232,6 @@ def _indices_for_tasks(
                 for index in range(start, end)
             ]
 
-    # Fast path for HuggingFace Dataset
-    if hasattr(dataset, "column_names") and "task_index" in dataset.column_names:
-        try:
-            task_indices_col = dataset["task_index"]
-            return [
-                index
-                for index, task_val in enumerate(task_indices_col)
-                if int(task_val) in selected_tasks
-            ]
-        except Exception:
-            pass
-
-    # Fast path for LeRobotDataset wrapper
-    hf_dataset = getattr(dataset, "hf_dataset", None)
-    if hf_dataset is not None and hasattr(hf_dataset, "column_names") and "task_index" in hf_dataset.column_names:
-        try:
-            task_indices_col = hf_dataset["task_index"]
-            return [
-                index
-                for index, task_val in enumerate(task_indices_col)
-                if int(task_val) in selected_tasks
-            ]
-        except Exception:
-            pass
-
     task_source = _make_task_source(dataset)
     return [
         index
@@ -335,11 +262,6 @@ def _episode_task_index(row: Mapping[str, Any]) -> int | None:
 
 
 def _make_task_source(dataset: Any) -> Any:
-    if hasattr(dataset, "select_columns"):
-        try:
-            return dataset.select_columns(["task_index"])
-        except Exception:
-            pass
     hf_dataset = getattr(dataset, "hf_dataset", None)
     if hf_dataset is not None and hasattr(hf_dataset, "select_columns"):
         try:
