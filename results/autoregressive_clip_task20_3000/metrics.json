@@ -1,0 +1,36 @@
+{
+  "checkpoint": "runs/autoregressive/ar_clip_task20_3000/checkpoint_final.pt",
+  "decoder_latency": {
+    "mean_ms": 1102.3455662821107,
+    "median_ms": 995.469146000687,
+    "samples": 32
+  },
+  "device": "mps",
+  "end_to_end_latency": {
+    "mean_ms": 1039.8494154383116,
+    "median_ms": 997.6961669963202,
+    "samples": 32
+  },
+  "eval_episode_ids": [
+    880,
+    898,
+    926,
+    1045,
+    1049,
+    1073,
+    1121,
+    1155,
+    1172
+  ],
+  "quality": {
+    "l1": 0.10270089294285925,
+    "mse": 0.07155398182676284,
+    "token_accuracy": 0.45754866544248207,
+    "token_cross_entropy": 2.2212314620065094,
+    "valid_action_values": 126168,
+    "valid_tokens": 126168
+  },
+  "task_indices": [
+    20
+  ]
+}

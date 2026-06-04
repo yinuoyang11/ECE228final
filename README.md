@@ -74,6 +74,8 @@ PYTHONPATH=src conda run -n ece228-pi0lite \
 The evaluation command writes:
 
 - `metrics.json`
+- `args.json`
+- `training_metrics.csv`
 - `training_curves.png`
 - `eval_comparison.png`
 - `inference_latency.png`
