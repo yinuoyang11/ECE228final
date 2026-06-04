@@ -39,6 +39,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV PATH=/opt/venv/bin:${PATH}
 ENV PYTHONPATH=/opt/LIBERO:${PYTHONPATH}
+ENV LIBERO_CONFIG_PATH=/opt/libero-config
+ENV NUMBA_DISABLE_JIT=1
+ENV NUMBA_CACHE_DIR=/tmp/numba-cache
 RUN python3.12 -m venv /opt/venv \
  && python -m pip install --upgrade pip setuptools wheel
 
@@ -65,7 +68,10 @@ RUN python -m pip install \
 # Clone and install; skip bddl/init_states download at build time –
 # they are bundled with the package via the libero.libero module.
 RUN git clone --depth 1 https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO \
- && python -m pip install -e /opt/LIBERO
+ && python -m pip install -e /opt/LIBERO \
+ && mkdir -p "${LIBERO_CONFIG_PATH}" /tmp/numba-cache \
+ && LIBERO_ROOT="/opt/LIBERO/libero/libero" \
+ && printf "assets: %s/assets\nbddl_files: %s/bddl_files\nbenchmark_root: %s\ndatasets: %s/../datasets\ninit_states: %s/init_files\n" "${LIBERO_ROOT}" "${LIBERO_ROOT}" "${LIBERO_ROOT}" "${LIBERO_ROOT}" "${LIBERO_ROOT}" > "${LIBERO_CONFIG_PATH}/config.yaml"
 
 # ── project Python deps ───────────────────────────────────────────────────────
 WORKDIR /workspace
@@ -76,7 +82,7 @@ COPY src ./src
 # overrides – those are already installed above.
 RUN python -m pip install -e ".[dev,encoder]" \
  && python -m pip install matplotlib pyarrow \
- && python -c "import libero; from libero.libero import benchmark; print('libero_paths=' + str(list(libero.__path__))); print(sorted(benchmark.get_benchmark_dict()))"
+ && python -c "import bddl, gym, robosuite, yaml; import libero; from libero.libero import benchmark, get_libero_path; from libero.libero.envs import OffScreenRenderEnv; print('libero_paths=' + str(list(libero.__path__))); print(sorted(benchmark.get_benchmark_dict())); print(get_libero_path('assets')); print(OffScreenRenderEnv)"
 
 # ── copy remaining source ─────────────────────────────────────────────────────
 COPY scripts ./scripts
@@ -87,9 +93,5 @@ ENV MUJOCO_GL=egl
 ENV PYOPENGL_PLATFORM=egl
 # Silence HuggingFace symlink warning on Linux
 ENV HF_HUB_DISABLE_SYMLINKS_WARNING=1
-
-# Pre-create LIBERO config so it doesn't ask interactive questions
-RUN mkdir -p /root/.libero \
- && printf "datasets_default_path: /data/libero_datasets\n" > /root/.libero/config.yaml
 
 CMD ["python", "scripts/sim_rollout_regression.py", "--help"]
