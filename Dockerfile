@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PATH=/opt/venv/bin:${PATH}
+ENV PYTHONPATH=/opt/LIBERO:${PYTHONPATH}
 RUN python3.12 -m venv /opt/venv \
  && python -m pip install --upgrade pip setuptools wheel
 
@@ -54,7 +55,7 @@ RUN python -m pip install robosuite==1.4.0
 # they are bundled with the package via the libero.libero module.
 RUN git clone --depth 1 https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO \
  && python -m pip install -e /opt/LIBERO \
- && python -c "import libero; from libero.libero import benchmark; print('libero=' + libero.__file__); print(sorted(benchmark.get_benchmark_dict()))"
+ && python -c "import libero; from libero.libero import benchmark; print('libero_paths=' + str(list(libero.__path__))); print(sorted(benchmark.get_benchmark_dict()))"
 
 # ── project Python deps ───────────────────────────────────────────────────────
 WORKDIR /workspace
