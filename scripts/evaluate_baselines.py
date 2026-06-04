@@ -25,6 +25,7 @@ from lerobot_policy_pi0_lite_flow.autoregressive_experiment import (  # noqa: E4
     CachedFeatureDataset,
     build_encoder,
     build_policy,
+    cache_frozen_features,
     cached_batch_to_device,
     collate_raw,
     condition_from_cached,
@@ -252,21 +253,31 @@ def main() -> None:
     load_trainable_encoder_state_dict(encoder, checkpoint["encoder_state_dict"])
     policy.load_state_dict(checkpoint["policy_state_dict"])
 
+    eval_indices = checkpoint["split"]["eval_indices"]
+    max_eval_samples = train_args.get("max_eval_samples")
+    if max_eval_samples is not None:
+        eval_indices = eval_indices[: int(max_eval_samples)]
+    raw_eval_dataset = Subset(raw_action_dataset, eval_indices)
+
     eval_cache_path = args.checkpoint.parent / "eval_features.pt"
-    if not eval_cache_path.exists():
-        raise FileNotFoundError(f"Missing feature cache: {eval_cache_path}")
-    eval_cache = CachedFeatureDataset(torch.load(eval_cache_path, map_location="cpu", weights_only=True))
+    if eval_cache_path.exists():
+        eval_cache = CachedFeatureDataset(torch.load(eval_cache_path, map_location="cpu", weights_only=True))
+    else:
+        print(f"Missing feature cache; rebuilding {eval_cache_path}...", flush=True)
+        eval_cache = cache_frozen_features(
+            encoder,
+            raw_eval_dataset,
+            device,
+            batch_size,
+            args.num_workers,
+        )
+        torch.save(eval_cache.tensors, eval_cache_path)
 
     print(f"Evaluating {len(eval_cache)} held-out samples...", flush=True)
     quality = evaluate_quality(encoder, policy, eval_cache, device, batch_size, args.num_workers)
     print("Measuring decoder-only latency...", flush=True)
     decoder_latency = measure_decoder_latency(encoder, policy, eval_cache, device, args.latency_samples)
 
-    eval_indices = checkpoint["split"]["eval_indices"]
-    max_eval_samples = train_args.get("max_eval_samples")
-    if max_eval_samples is not None:
-        eval_indices = eval_indices[: int(max_eval_samples)]
-    raw_eval_dataset = Subset(raw_action_dataset, eval_indices)
     print("Measuring raw image/text end-to-end latency...", flush=True)
     end_to_end_latency = measure_end_to_end_latency(
         encoder,

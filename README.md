@@ -66,10 +66,14 @@ Only the state encoder, fusion layers, and autoregressive decoder are optimized.
 ```bash
 PYTHONPATH=src conda run -n ece228-pi0lite \
   python scripts/evaluate_baselines.py \
-  runs/autoregressive/ar_clip_task20_3000/checkpoint_final.pt \
+  artifacts/autoregressive_clip_task20_3000/checkpoint_final.pt \
   --device mps \
   --output-dir results/autoregressive_clip_task20_3000
 ```
+
+If the frozen CLIP feature cache is not present beside the checkpoint, the
+evaluation script rebuilds it from the held-out episode split stored in the
+checkpoint.
 
 The evaluation command writes:
 
@@ -80,6 +84,34 @@ The evaluation command writes:
 - `eval_comparison.png`
 - `inference_latency.png`
 - `results_table.tex`
+
+## Measure LIBERO Success Rate
+
+The final checkpoint can be evaluated in the LIBERO simulator with the
+autoregressive rollout entry point. LIBERO simulation requires Linux/EGL,
+`ffmpeg`, and `lerobot[libero]`; it is not part of the basic macOS training
+environment.
+
+```bash
+INSTALL_LIBERO=1 bash scripts/docker_build.sh
+
+docker run --rm --gpus all --ipc=host \
+  --env MUJOCO_GL=egl \
+  --env PYOPENGL_PLATFORM=egl \
+  --volume "$PWD/artifacts:/workspace/artifacts" \
+  --volume "$HOME/.cache/huggingface:/cache/huggingface" \
+  ece228-pi0-lite-flow:latest \
+  python scripts/eval_autoregressive_libero_rollout.py \
+    artifacts/autoregressive_clip_task20_3000/checkpoint_final.pt \
+    --suite libero_object \
+    --dataset-task-indices 20 \
+    --episodes-per-task 10 \
+    --device cuda
+```
+
+This writes episode videos and `rollout_metrics.json` beside the checkpoint.
+The checkpoint is kept in the local `artifacts/` folder and intentionally
+ignored by Git; share it separately from the normal source-code repository.
 
 ## Shared Encoder and Flow Training
 
@@ -102,6 +134,7 @@ src/lerobot_policy_pi0_lite_flow/
 scripts/
   train_baselines.py
   evaluate_baselines.py
+  eval_autoregressive_libero_rollout.py
   smoke_clip_encoder.py
 ```
 

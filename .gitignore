@@ -16,6 +16,7 @@ build/
 dist/
 *.log
 runs/
+artifacts/
 checkpoints/
 checkpoints_smoke/
 rollout_videos/
