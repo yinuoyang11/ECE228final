@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hf_cache/
+.cache/
 .venv/
 venv/
 env/
@@ -14,5 +16,6 @@ dist/
 *.log
 runs/
 checkpoints/
+rollout_videos/
 .DS_Store
 Thumbs.db

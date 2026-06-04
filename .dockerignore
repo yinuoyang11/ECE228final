@@ -1,5 +1,7 @@
 .git
 .pytest_cache
+.hf_cache
+.cache
 .venv
 __pycache__
 *.egg-info
@@ -8,3 +10,4 @@ build
 dist
 runs
 checkpoints
+rollout_videos
